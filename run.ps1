@@ -44,6 +44,57 @@ function Get-FileLengthOrZero {
     return 0
 }
 
+function Get-AppendedText {
+    param(
+        [string]$Path,
+        [long]$Offset
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return ""
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    if ($item.Length -le $Offset) {
+        return ""
+    }
+
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $stream.Seek($Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true, 4096, $true)
+        try {
+            return $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Test-XrayLogContainsTarget {
+    param(
+        [string]$Target,
+        [string]$LogText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogText)) {
+        return $false
+    }
+
+    try {
+        $targetHost = ([Uri]$Target).Host
+    }
+    catch {
+        return $false
+    }
+
+    return $LogText -like "*//$targetHost*"
+}
+
 function Find-Browser {
     if (-not [string]::IsNullOrWhiteSpace($BrowserPath) -and (Test-Path -LiteralPath $BrowserPath)) {
         return $BrowserPath
@@ -124,6 +175,7 @@ function New-Result {
         [string]$Error,
         [long]$BeforeLogLength,
         [long]$AfterLogLength,
+        [bool]$XrayMatchedTarget,
         [bool]$Skipped = $false
     )
 
@@ -137,7 +189,8 @@ function New-Result {
         statusCode = $StatusCode
         elapsedMs = $ElapsedMs
         xrayAccessLogBytesDelta = $delta
-        likelyReachedXray = $delta -gt 0
+        likelyReachedXray = $XrayMatchedTarget
+        xrayMatchedTarget = $XrayMatchedTarget
         bodySample = $BodySample
         error = $Error
     }
@@ -367,6 +420,8 @@ function Invoke-LabProbe {
 
     Start-Sleep -Milliseconds 300
     $afterLogLength = Get-FileLengthOrZero -Path $XrayAccessLog
+    $newXrayLogText = Get-AppendedText -Path $XrayAccessLog -Offset $beforeLogLength
+    $xrayMatchedTarget = Test-XrayLogContainsTarget -Target $Target -LogText $newXrayLogText
 
     New-Result `
         -Profile $Profile `
@@ -379,6 +434,7 @@ function Invoke-LabProbe {
         -Error ([string]$probe.error) `
         -BeforeLogLength $beforeLogLength `
         -AfterLogLength $afterLogLength `
+        -XrayMatchedTarget $xrayMatchedTarget `
         -Skipped ([bool]$probe.skipped)
 }
 
