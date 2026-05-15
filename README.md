@@ -13,7 +13,7 @@ The lab does not need Russian users. It compares several traffic profiles:
   Edge/Chrome is installed.
 
 The main signal is `likelyReachedXray`. It is calculated by checking whether
-`%LOCALAPPDATA%\LokiClient\logs\xray-access.log` grew during the probe.
+new Xray access-log lines contain the target host during the probe.
 
 ## Run
 
@@ -59,3 +59,19 @@ If browser profiles are skipped, install Edge or Chrome, or pass a path:
 ```powershell
 .\traffic-lab\run.ps1 -BrowserPath "C:\Program Files\Google\Chrome\Application\chrome.exe"
 ```
+
+## Observe A Real App
+
+Use `observe-app.ps1` when the app is already running and you need to confirm
+whether its live TCP connections go through the local proxy:
+
+```powershell
+.\traffic-lab\observe-app.ps1 `
+  -ProcessName steam,steamwebhelper,steamservice `
+  -ProxyPort 18091 `
+  -ExpectedHosts store.steampowered.com,steamcommunity.com,api.steampowered.com,steamconnecttest.com,steamserver.net
+```
+
+The observer writes JSON/CSV reports to `traffic-lab\artifacts`, counts live
+connections to `127.0.0.1:<proxy-port>`, and checks recent Xray access-log lines
+for the expected hosts.

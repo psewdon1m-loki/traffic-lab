@@ -336,17 +336,31 @@ function Invoke-BrowserProbe {
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $browser
-    $psi.Arguments = "--headless=new --disable-gpu --disable-background-networking --disable-extensions --user-data-dir=`"$profileDir`" $proxyArg --dump-dom `"$Target`""
+    $psi.Arguments = "--headless=new --no-startup-window --no-first-run --no-default-browser-check --disable-gpu --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-breakpad --disable-component-update --disable-extensions --disable-features=CalculateNativeWinOcclusion,MediaRouter,OptimizationHints,Translate --disable-sync --metrics-recording-only --user-data-dir=`"$profileDir`" $proxyArg --dump-dom `"$Target`""
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 
     try {
         return Invoke-ProcessProbe -ProcessStartInfo $psi
     }
     finally {
+        Stop-BrowserProfileProcesses -ProfileDir $profileDir
         Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Stop-BrowserProfileProcesses {
+    param([string]$ProfileDir)
+
+    $escapedProfileDir = [Regex]::Escape($ProfileDir)
+    $processes = Get-CimInstance Win32_Process -Filter "name='msedge.exe' or name='chrome.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match $escapedProfileDir }
+
+    foreach ($process in $processes) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
 }
 
