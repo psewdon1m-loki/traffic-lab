@@ -528,10 +528,15 @@ final class ProbeSuite {
     }
 
     static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout) throws Exception {
+        return http(url, proxy, method, body, maxResponse, timeout, false);
+    }
+
+    static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout, boolean forceClose) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) (proxy == null ? new URL(url).openConnection() : new URL(url).openConnection(proxy));
         connection.setConnectTimeout(timeout); connection.setReadTimeout(timeout); connection.setInstanceFollowRedirects(true);
         connection.setRequestProperty("User-Agent", "LokiTrafficLabAndroid/1.0");
         connection.setRequestProperty("Accept", "application/json,text/plain,*/*");
+        connection.setRequestProperty("Connection", forceClose ? "close" : "keep-alive");
         connection.setRequestMethod(method);
         if (body != null) {
             connection.setDoOutput(true); connection.setFixedLengthStreamingMode(body.length);

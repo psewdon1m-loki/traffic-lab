@@ -29,7 +29,7 @@ final class ResultPackager {
         deleteTree(directory);
         if (!directory.mkdirs() && !directory.isDirectory()) throw new IllegalStateException("Could not create result cache");
         String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date());
-        File zip = new File(directory, "traffic-lab-android-results-" + stamp + "-" + input.runId.substring(input.runId.length() - 8) + ".zip");
+        File zip = new File(directory, "traffic-lab-android-" + input.testType.value + "-results-" + stamp + "-" + input.runId.substring(input.runId.length() - 8) + ".zip");
         Map<String, List<String>> shared = sharedBackends(input.profiles);
         Set<String> folders = new HashSet<>();
         try (ZipOutputStream output = new ZipOutputStream(new FileOutputStream(zip), StandardCharsets.UTF_8)) {
@@ -40,6 +40,7 @@ final class ResultPackager {
                 write(output, prefix + "local-machine.json", localJson(input, profile).toString(2));
                 write(output, prefix + "osi-map.md", osiMap(input, profile));
                 write(output, prefix + "README.txt", readme(input, profile));
+                if (input.testType.extended()) write(output, prefix + "extended-test.json", extendedJson(input, profile).toString(2));
             }
         }
         return zip;
@@ -54,6 +55,7 @@ final class ResultPackager {
         JsonUtil.put(connection, "observedCamouflageIps", JsonUtil.array(profile.camouflageIps));
         JsonUtil.put(connection, "exitAttribution", profile.exitAttribution); JsonUtil.put(connection, "stages", profile.stages);
         JsonUtil.put(connection, "statusCounts", statusCounts(profile.stages)); JsonUtil.put(connection, "inferences", profile.inferences);
+        if (input.testType.extended()) JsonUtil.put(connection, "extendedResultsFile", "extended-test.json");
         JSONArray sharedRows = new JSONArray();
         for (Map.Entry<String, List<String>> entry : shared.entrySet()) if (entry.getValue().contains(profile.profileId)) {
             sharedRows.put(JsonUtil.object("ip", entry.getKey(), "profileIds", JsonUtil.array(entry.getValue())));
@@ -64,6 +66,20 @@ final class ResultPackager {
         JsonUtil.put(root, "directVersusTunnel", comparison);
         JsonUtil.put(root, "probabilityNotice", "Percentages and confidence labels are conservative heuristic evidence weights, not calibrated statistical probabilities.");
         JsonUtil.put(root, "limitations", commonLimitations());
+        return root;
+    }
+
+    static JSONObject extendedJson(PackageInput input, TrafficLabRunner.ProfileResult profile) {
+        JSONObject root = base(input, "extended-test-results");
+        JsonUtil.put(root, "connection", JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal,
+                "name", profile.name, "profileFingerprint", profile.fingerprint));
+        JsonUtil.put(root, "statusCounts", statusCounts(profile.extendedStages));
+        JsonUtil.put(root, "stages", profile.extendedStages);
+        JsonUtil.put(root, "limitations", new JSONArray()
+                .put("Android extended interruption stops only Traffic Lab's isolated Xray process; it does not disable the radio, modify routes or interrupt unrelated applications.")
+                .put("Cold/warm and parallel-flow behavior is requested at the Android client/Xray inbound; a controlled canary is required to prove server-side connection reuse or multiplexing.")
+                .put("DNS failure/recovery uses a reserved .invalid name and does not inject an outage into the operator recursive resolver.")
+                .put("Soak loss and jitter are HTTPS application observations, not ICMP packet statistics."));
         return root;
     }
 
@@ -82,15 +98,22 @@ final class ResultPackager {
         return root;
     }
 
-    private static JSONObject base(PackageInput input, String outputType) {
+    static JSONObject base(PackageInput input, String outputType) {
         JSONObject root = new JSONObject(); JsonUtil.put(root, "schemaVersion", "1.0"); JsonUtil.put(root, "outputType", outputType);
         JsonUtil.put(root, "generatedAt", JsonUtil.now());
         JSONObject run = new JSONObject(); JsonUtil.put(run, "runId", input.runId); JsonUtil.put(run, "startedAt", input.startedAt);
         JsonUtil.put(run, "completedAt", input.completedAt); JsonUtil.put(run, "durationMs", input.durationMs);
-        JsonUtil.put(run, "platform", "Android"); JsonUtil.put(run, "executionOrder", "sequential");
+        JsonUtil.put(run, "testType", input.testType.value); JsonUtil.put(run, "platform", "android");
+        JsonUtil.put(run, "operatingSystem", "Android " + androidRelease());
+        JsonUtil.put(run, "operatingSystemVersion", androidRelease()); JsonUtil.put(run, "androidApiLevel", Build.VERSION.SDK_INT);
+        JsonUtil.put(run, "extendedTest", JsonUtil.object("enabled", input.testType.extended(),
+                "soakDurationSeconds", input.testType.extended() ? AndroidExtendedTestSuite.SOAK_SECONDS : null,
+                "parallelFlows", input.testType.extended() ? AndroidExtendedTestSuite.PARALLEL_FLOWS : null,
+                "processInterruptionSeconds", input.testType.extended() ? AndroidExtendedTestSuite.INTERRUPTION_SECONDS : null));
+        JsonUtil.put(run, "executionOrder", "sequential");
         JsonUtil.put(run, "inputSource", "in-app clipboard/import field"); JsonUtil.put(root, "run", run);
-        JSONObject tool = new JSONObject(); JsonUtil.put(tool, "name", "Loki Traffic Lab Android"); JsonUtil.put(tool, "version", "1.0.0");
-        JsonUtil.put(tool, "embeddedXrayVersion", input.xrayVersion); JsonUtil.put(tool, "abi", Build.SUPPORTED_ABIS[0]); JsonUtil.put(root, "tool", tool);
+        JSONObject tool = new JSONObject(); JsonUtil.put(tool, "name", "Loki Traffic Lab Android"); JsonUtil.put(tool, "version", BuildConfig.VERSION_NAME);
+        JsonUtil.put(tool, "embeddedXrayVersion", input.xrayVersion); JsonUtil.put(tool, "abi", primaryAbi()); JsonUtil.put(root, "tool", tool);
         return root;
     }
 
@@ -122,18 +145,23 @@ final class ResultPackager {
     }
 
     private static String readme(PackageInput input, TrafficLabRunner.ProfileResult profile) {
-        JSONObject counts = statusCounts(profile.stages);
+        JSONObject counts = statusCounts(combinedStages(profile, input.testType.extended()));
         return "LOKI TRAFFIC LAB - ANDROID TEST RESULT PACKAGE\n"
                 + "================================================\n\n"
                 + "Run ID: " + input.runId + "\n"
                 + "Test started (UTC): " + input.startedAt + "\n"
                 + "Test completed (UTC): " + input.completedAt + "\n"
                 + "Duration: " + formatDuration(input.durationMs) + "\n"
+                + "Test type: " + input.testType.value.toUpperCase(Locale.ROOT) + (input.testType.extended() ? " (long-running/process-disruptive extended suite)" : " (standard suite)") + "\n"
+                + (input.testType.extended() ? "Extended settings: soak=" + AndroidExtendedTestSuite.SOAK_SECONDS + "s, parallel flows=" + AndroidExtendedTestSuite.PARALLEL_FLOWS + ", process interruption=" + AndroidExtendedTestSuite.INTERRUPTION_SECONDS + "s\n" : "")
                 + "Device local timezone: " + TimeZone.getDefault().getID() + "\n"
-                + "Platform: Android " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT + "\n"
+                + "Platform: android\n"
+                + "Operating system: Android " + androidRelease() + "\n"
+                + "Android API level: " + Build.VERSION.SDK_INT + "\n"
                 + "Device: " + Build.MANUFACTURER + " " + Build.MODEL + "\n"
-                + "ABI: " + Build.SUPPORTED_ABIS[0] + "\n"
-                + "Tool: Loki Traffic Lab Android 1.0.0\n"
+                + "ABI: " + primaryAbi() + "\n"
+                + "Test execution node: Android device, Loki Traffic Lab APK tester\n"
+                + "Tool: Loki Traffic Lab Android " + BuildConfig.VERSION_NAME + "\n"
                 + "Core: " + input.xrayVersion + "\n"
                 + "Connections loaded/scheduled: " + input.profiles.size() + "/" + input.profiles.size() + "\n"
                 + "Execution order: sequential\n"
@@ -149,6 +177,7 @@ final class ResultPackager {
                 + "local-machine.json Android device/network passport and direct-network measurements.\n"
                 + "osi-map.md         Seven-layer evidence table and traffic path.\n"
                 + "README.txt         Run metadata, file guide, privacy and confidence notes.\n\n"
+                + (input.testType.extended() ? "extended-test.json Long-running, parallel, DNS recovery, soak, reconnect and process-interruption stages.\n\n" : "")
                 + "PRIVACY AND STORAGE\n-------------------\n"
                 + "The raw VLESS URI, UUID, REALITY public key and short ID are not written to this archive.\n"
                 + "Subscriber identifiers, phone number, IMSI, ICCID, precise cell identity and GPS location are not collected.\n"
@@ -167,6 +196,22 @@ final class ResultPackager {
             JsonUtil.put(counts, status, counts.optInt(status) + 1);
         }
         return counts;
+    }
+
+    private static JSONArray combinedStages(TrafficLabRunner.ProfileResult profile, boolean includeExtended) {
+        JSONArray values = new JSONArray();
+        for (int index = 0; index < profile.stages.length(); index++) values.put(profile.stages.opt(index));
+        if (includeExtended) for (int index = 0; index < profile.extendedStages.length(); index++) values.put(profile.extendedStages.opt(index));
+        return values;
+    }
+
+    private static String androidRelease() {
+        String value = Build.VERSION.RELEASE;
+        return value == null || value.trim().isEmpty() ? "unknown" : value.trim();
+    }
+
+    private static String primaryAbi() {
+        return Build.SUPPORTED_ABIS == null || Build.SUPPORTED_ABIS.length == 0 ? "unknown" : Build.SUPPORTED_ABIS[0];
     }
 
     private static Map<String, List<String>> sharedBackends(List<TrafficLabRunner.ProfileResult> profiles) {
@@ -209,10 +254,12 @@ final class ResultPackager {
     static final class PackageInput {
         final String runId; final String startedAt; final String completedAt; final long durationMs; final String xrayVersion;
         final JSONObject node; final JSONArray directExit; final JSONArray directAttribution; final List<TrafficLabRunner.ProfileResult> profiles;
+        final TrafficLabRunner.TestType testType;
         PackageInput(String runId, String startedAt, String completedAt, long durationMs, String xrayVersion, JSONObject node,
-                     JSONArray directExit, JSONArray directAttribution, List<TrafficLabRunner.ProfileResult> profiles) {
+                     JSONArray directExit, JSONArray directAttribution, List<TrafficLabRunner.ProfileResult> profiles, TrafficLabRunner.TestType testType) {
             this.runId = runId; this.startedAt = startedAt; this.completedAt = completedAt; this.durationMs = durationMs;
             this.xrayVersion = xrayVersion; this.node = node; this.directExit = directExit; this.directAttribution = directAttribution; this.profiles = profiles;
+            this.testType = testType == null ? TrafficLabRunner.TestType.NORMAL : testType;
         }
     }
 }

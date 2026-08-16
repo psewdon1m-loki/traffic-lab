@@ -59,6 +59,10 @@ final class AndroidNetworkDiagnostics {
         JSONObject root = new JSONObject();
         JsonUtil.put(root, "capturedAt", JsonUtil.now());
         JsonUtil.put(root, "platform", "android");
+        JsonUtil.put(root, "operatingSystem", "Android " + Build.VERSION.RELEASE);
+        JsonUtil.put(root, "operatingSystemVersion", Build.VERSION.RELEASE);
+        JsonUtil.put(root, "androidApiLevel", Build.VERSION.SDK_INT);
+        JsonUtil.put(root, "applicationVersion", BuildConfig.VERSION_NAME);
         JsonUtil.put(root, "device", captureDevice(context));
 
         ConnectivityManager manager = context.getSystemService(ConnectivityManager.class);

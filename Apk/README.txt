@@ -2,8 +2,9 @@ LOKI TRAFFIC LAB - ANDROID APK
 ================================
 
 This folder contains the native Android adaptation of Traffic Lab. The APK uses
-the same result contract as Windows/Linux: four files per tested connection,
-ordered named folders for multiple connections, explicit facts versus bounded
+the same result contract as Windows/Linux: four files per tested connection in
+normal mode and a fifth, separate extended-test.json in extended mode, ordered
+named folders for multiple connections, explicit facts versus bounded
 inferences, and no raw URI/UUID/REALITY credential in reports.
 
 SUPPORTED DEVICES
@@ -25,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.1.3.apk
+  Apk\releases\LokiTrafficLab-android-3.2.0.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -37,8 +38,11 @@ DEVICE WORKFLOW
 1. Copy one or several VLESS links as ordinary text.
 2. Tap `Paste links from clipboard`. The parser finds every vless:// occurrence,
    normalizes raw spaces in display names and preserves input order/duplicates.
-3. Tap `Start test`. If Android reports an active VPN transport, Traffic Lab
-   blocks the baseline and opens VPN settings so it can be disabled first.
+3. Tap `Start test` for the normal suite, or use the separate `Extended test`
+   command for the normal suite plus long-running and process-disruptive checks.
+   Extended mode asks for confirmation before it starts. If Android reports an
+   active VPN transport, Traffic Lab blocks the baseline and opens VPN settings
+   so it can be disabled first.
 4. The foreground test service shows percent, connection count, elapsed time,
    approximate ETA and the current stage. `Stop test` is emergency cancellation.
 5. When complete, use `Save ZIP` for Android's system document picker or
@@ -63,6 +67,16 @@ embedded Xray validation/start, authenticated HTTP, exit-IP comparison, SOCKS
 remote-domain DNS, bounded download/upload and payload matrix, stability, real
 SOCKS5 UDP DNS, tunneled STUN mapping, invalid UUID/shortId/SNI controls, explicit XUDP A/B testing,
 core logs, shared-backend grouping, infrastructure signals and OSI mapping.
+
+Extended mode additionally records 6 cold and 6 warm HTTP observations, 20
+parallel TCP flows, 20 independent SOCKS5 UDP associations, tunneled DNS
+failure/recovery using a unique reserved .invalid name, a five-minute
+application latency/jitter/loss soak, forced Xray reconnect and a five-second
+controlled interruption. The interruption stops only this app's isolated Xray
+child process. It never disables Wi-Fi/LTE, changes Android routes or affects
+other applications. Extended stages and their limitations are written only to
+extended-test.json; every result file and README identify the NORMAL or
+EXTENDED mode, Android release/API level and APK version.
 
 Android-specific local-machine evidence includes:
 
@@ -92,10 +106,10 @@ commands and the standalone collector service, and excludes Android-only node
 evidence.
 
 The API 35 x86_64 emulator acceptance run with the supplied REALITY profile
-produced 31 passed, 3 partial, 0 failed and 3 skipped stages. The skipped plain
+produced 31 passed, 3 partial, 0 failed and 3 skipped standard stages. The skipped plain
 WebSocket stage was not applicable to that TCP profile; controlled canary and
 QUIC were unavailable. A two-profile sequential run produced two ordered ZIP
-folders with exactly four result files in each. Both archives were scanned to
+folders with exactly four normal-result files in each. Both archives were scanned to
 confirm that the supplied UUID was absent.
 
 KNOWN GAPS

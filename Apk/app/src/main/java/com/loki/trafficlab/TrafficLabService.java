@@ -27,10 +27,10 @@ public final class TrafficLabService extends Service {
 
     static final class State {
         final String phase; final int percent; final int completed; final int total; final String message;
-        final long startedAtMs; final long durationMs; final File zip; final boolean usable;
-        State(String phase, int percent, int completed, int total, String message, long startedAtMs, long durationMs, File zip, boolean usable) {
+        final long startedAtMs; final long durationMs; final File zip; final boolean usable; final TrafficLabRunner.TestType testType;
+        State(String phase, int percent, int completed, int total, String message, long startedAtMs, long durationMs, File zip, boolean usable, TrafficLabRunner.TestType testType) {
             this.phase = phase; this.percent = percent; this.completed = completed; this.total = total; this.message = message;
-            this.startedAtMs = startedAtMs; this.durationMs = durationMs; this.zip = zip; this.usable = usable;
+            this.startedAtMs = startedAtMs; this.durationMs = durationMs; this.zip = zip; this.usable = usable; this.testType = testType;
         }
         boolean running() { return "running".equals(phase); }
         boolean completed() { return "completed".equals(phase); }
@@ -40,7 +40,7 @@ public final class TrafficLabService extends Service {
 
     private final IBinder binder = new LocalBinder();
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private volatile State state = new State("idle", 0, 0, 0, "Ready", 0, 0, null, false);
+    private volatile State state = new State("idle", 0, 0, 0, "Ready", 0, 0, null, false, TrafficLabRunner.TestType.NORMAL);
     private volatile Listener listener;
     private volatile TrafficLabRunner runner;
     private PowerManager.WakeLock wakeLock;
@@ -60,32 +60,37 @@ public final class TrafficLabService extends Service {
     void setListener(Listener listener) { this.listener = listener; if (listener != null) listener.onState(state); }
     State state() { return state; }
 
-    synchronized void startTests(List<String> connections) {
+    synchronized void startTests(List<String> connections) { startTests(connections, TrafficLabRunner.TestType.NORMAL); }
+
+    synchronized void startTests(List<String> connections, TrafficLabRunner.TestType testType) {
         if (state.running()) return;
+        if (testType == null) testType = TrafficLabRunner.TestType.NORMAL;
+        final TrafficLabRunner.TestType selectedType = testType;
         ArrayList<String> copy = new ArrayList<>(connections);
+        deleteTree(new File(getCacheDir(), "results"));
         long started = System.currentTimeMillis();
-        update(new State("running", 0, 0, copy.size(), "Starting", started, 0, null, false));
+        update(new State("running", 0, 0, copy.size(), "Starting " + selectedType.value + " test", started, 0, null, false, selectedType));
         acquireWakeLock();
         runner = new TrafficLabRunner(this, (percent, completed, total, message) -> {
             long duration = Math.max(0, System.currentTimeMillis() - started);
-            update(new State("running", percent, completed, total, message, started, duration, null, false));
+            update(new State("running", percent, completed, total, message, started, duration, null, false, selectedType));
         });
         executor.submit(() -> {
             try {
-                TrafficLabRunner.RunResult result = runner.run(copy);
+                TrafficLabRunner.RunResult result = runner.run(copy, selectedType);
                 copy.clear();
                 update(new State("completed", 100, result.profileCount, result.profileCount,
-                        result.usable ? "Testing completed successfully" : "Testing completed; no usable profile was confirmed",
-                        started, result.durationMs, result.zip, result.usable));
+                        result.usable ? selectedType.value + " testing completed successfully" : selectedType.value + " testing completed; no usable profile was confirmed",
+                        started, result.durationMs, result.zip, result.usable, result.testType));
             } catch (InterruptedException error) {
                 Thread.currentThread().interrupt(); copy.clear();
                 update(new State("canceled", state.percent, state.completed, state.total, "Testing canceled", started,
-                        System.currentTimeMillis() - started, null, false));
+                        System.currentTimeMillis() - started, null, false, selectedType));
             } catch (Exception error) {
                 copy.clear();
                 update(new State("failed", state.percent, state.completed, state.total,
                         "Test failed: " + JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage()), started,
-                        System.currentTimeMillis() - started, null, false));
+                        System.currentTimeMillis() - started, null, false, selectedType));
             } finally {
                 runner = null; releaseWakeLock();
                 stopForeground(STOP_FOREGROUND_REMOVE);
@@ -101,7 +106,7 @@ public final class TrafficLabService extends Service {
     synchronized void clearConnectionsAndResult() {
         cancelTests();
         deleteTree(new File(getCacheDir(), "results"));
-        state = new State("idle", 0, 0, 0, "Connection list and temporary result cleared", 0, 0, null, false);
+        state = new State("idle", 0, 0, 0, "Connection list and temporary result cleared", 0, 0, null, false, TrafficLabRunner.TestType.NORMAL);
         notifyListener();
         stopSelf();
     }

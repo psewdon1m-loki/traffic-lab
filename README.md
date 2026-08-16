@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.1.3.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.2.0.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -225,6 +225,12 @@ separate `extended-test.json` package layout, explicit NORMAL/EXTENDED metadata,
 and platform/distribution/kernel/architecture fields. Its controlled
 interruption uses SIGSTOP/SIGCONT only on Traffic Lab's own Xray child and never
 changes UFW, routes or network interfaces.
+Android release 3.2.0 adds a separate `Extended test` command. It records the
+same NORMAL/EXTENDED metadata and a fifth `extended-test.json`, then runs
+cold/warm observations, parallel TCP/UDP, DNS failure/recovery, a five-minute
+application soak, forced reconnect and a five-second interruption scoped only
+to the APK's isolated Xray child. Android radios, routes and other applications
+are not changed.
 `STOP TEST` cancels rather than pauses: it
 terminates the current Xray process tree, removes incomplete outputs and makes
 the next START begin a new run from the first connection. Progress is deliberately labelled approximate because

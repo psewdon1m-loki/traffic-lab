@@ -1,4 +1,4 @@
-Loki Traffic Lab Portable 3.1.3
+Loki Traffic Lab Portable 3.2.0
 ==============================
 
 This directory is self-contained. The target Windows PC does not need .NET,

@@ -169,7 +169,7 @@ internal static partial class Program
             Tool = new ToolInfo
             {
                 Name = "Loki Traffic Lab Profile Runner",
-                Version = "3.1.3",
+                Version = "3.2.0",
                 XrayPath = Path.GetFileName(options.XrayPath),
                 XrayVersion = await ReadXrayVersionAsync(options.XrayPath, cancellationToken),
                 TimeoutSeconds = options.TimeoutSeconds,
@@ -2784,7 +2784,7 @@ internal static partial class Program
             ExtendedTest = new ExtendedTestMetadata { Enabled = true, Elevated = false, SoakDurationSeconds = 300, ParallelFlows = 20, NetworkLossSeconds = 5 },
             NetworkLabel = "self-test",
             TestContext = new TestContext { NodeId = "self-test-pc" },
-            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.1.3", XrayPath = "xray.exe", XrayVersion = "self-test" },
+            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.2.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
             Input = new InputSummary { LoadedConnections = 1, ScheduledConnections = 1 },
             Environment = new NetworkEnvironment()
         };

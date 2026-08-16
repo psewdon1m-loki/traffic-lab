@@ -26,6 +26,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class TrafficLabRunner {
     interface ProgressListener { void onProgress(int percent, int completed, int total, String message); }
 
+    enum TestType {
+        NORMAL("normal"), EXTENDED("extended");
+        final String value;
+        TestType(String value) { this.value = value; }
+        boolean extended() { return this == EXTENDED; }
+        static TestType from(String value) { return "extended".equalsIgnoreCase(value) ? EXTENDED : NORMAL; }
+    }
+
     private final Context context;
     private final ProgressListener progress;
     private final AtomicBoolean canceled = new AtomicBoolean();
@@ -39,12 +47,15 @@ final class TrafficLabRunner {
 
     void cancel() { canceled.set(true); xray.cancel(); }
 
-    RunResult run(List<String> connections) throws Exception {
+    RunResult run(List<String> connections) throws Exception { return run(connections, TestType.NORMAL); }
+
+    RunResult run(List<String> connections, TestType testType) throws Exception {
         if (connections == null || connections.isEmpty()) throw new IllegalArgumentException("No VLESS connections were supplied");
+        if (testType == null) testType = TestType.NORMAL;
         long startedNanos = System.nanoTime();
         String startedAt = JsonUtil.now();
         String runId = startedAt.replaceAll("[-:.TZ]", "").substring(0, 14) + "-" + UUID.randomUUID().toString().substring(0, 8);
-        report(2, 0, connections.size(), "Loaded " + connections.size() + " connection(s)");
+        report(2, 0, connections.size(), "Loaded " + connections.size() + " connection(s) for " + testType.value + " test");
         checkCanceled();
 
         report(5, 0, connections.size(), "Capturing Android network baseline");
@@ -65,7 +76,7 @@ final class TrafficLabRunner {
             int current = index;
             ProgressListener profileProgress = (percent, ignored, ignoredTotal, message) ->
                     report(start + (int) Math.round((end - start) * Math.max(0, Math.min(100, percent)) / 100.0), current, connections.size(), "profile-" + String.format(Locale.ROOT, "%02d", current + 1) + ": " + message);
-            ProfileResult profile = runProfile(connections.get(index), index + 1, directExit, profileProgress);
+            ProfileResult profile = runProfile(connections.get(index), index + 1, directExit, profileProgress, testType);
             profiles.add(profile);
             report(end, index + 1, connections.size(), "profile-" + String.format(Locale.ROOT, "%02d", index + 1) + ": completed");
         }
@@ -75,27 +86,31 @@ final class TrafficLabRunner {
         String completedAt = JsonUtil.now();
         long durationMs = ProbeSuite.elapsed(startedNanos);
         ResultPackager.PackageInput input = new ResultPackager.PackageInput(runId, startedAt, completedAt, durationMs,
-                xray.version(), node, directExit, directAttribution, profiles);
+                xray.version(), node, directExit, directAttribution, profiles, testType);
         report(97, connections.size(), connections.size(), "Creating temporary result ZIP");
         File zip = ResultPackager.create(context, input);
         boolean usable = false;
         for (ProfileResult profile : profiles) if (profile.usable) { usable = true; break; }
         report(100, connections.size(), connections.size(), usable ? "Testing completed successfully" : "Testing completed with no usable profile");
-        return new RunResult(zip, profiles.size(), durationMs, usable, startedAt, completedAt);
+        return new RunResult(zip, profiles.size(), durationMs, usable, startedAt, completedAt, testType);
     }
 
-    private ProfileResult runProfile(String raw, int ordinal, JSONArray directExit, ProgressListener listener) throws Exception {
+    private ProfileResult runProfile(String raw, int ordinal, JSONArray directExit, ProgressListener listener, TestType testType) throws Exception {
         String profileId = "profile-" + String.format(Locale.ROOT, "%02d", ordinal);
         JSONArray stages = new JSONArray();
+        JSONArray extendedStages = new JSONArray();
+        ProgressListener standardProgress = testType.extended()
+                ? (percent, completed, total, message) -> listener.onProgress((int) Math.round(percent * 0.58), completed, total, message)
+                : listener;
         ConnectionParser.Profile profile;
         try {
             profile = ConnectionParser.parse(raw);
         } catch (Exception error) {
             stages.put(JsonUtil.failed("profile.parse", 0, JsonUtil.redact(error.getMessage()), null));
-            return ProfileResult.invalid(profileId, ordinal, stages);
+            return ProfileResult.invalid(profileId, ordinal, stages, testType);
         }
         stages.put(JsonUtil.passed("profile.parse", 0, profile.declared()));
-        listener.onProgress(5, 0, 0, "profile parsed");
+        standardProgress.onProgress(5, 0, 0, "profile parsed");
 
         ProbeSuite.DnsResult endpointDns = ProbeSuite.dns(profile.host);
         stages.put(endpointDns.stage);
@@ -110,7 +125,7 @@ final class TrafficLabRunner {
             stages.put(JsonUtil.skipped("camouflage.dns", "Profile does not declare SNI."));
             stages.put(JsonUtil.skipped("camouflage.dnsConsistency", "No camouflage hostname."));
         }
-        listener.onProgress(18, 0, 0, "DNS checks completed");
+        standardProgress.onProgress(18, 0, 0, "DNS checks completed");
         checkCanceled();
 
         stages.put(ProbeSuite.tcp(endpointDns.addresses, profile.port, 3));
@@ -118,7 +133,7 @@ final class TrafficLabRunner {
         JsonUtil.put(mtu, "interfaceMtu", findActiveMtu(AndroidNetworkDiagnostics.capture(context)));
         JsonUtil.put(mtu, "method", "Android interface MTU plus tunneled payload sweep");
         stages.put(JsonUtil.partial("endpoint.pathMtu", 0, "Android apps cannot reliably set IPv4 DF or observe ICMP fragmentation-needed on every device.", mtu));
-        listener.onProgress(28, 0, 0, "endpoint transport checked");
+        standardProgress.onProgress(28, 0, 0, "endpoint transport checked");
 
         List<String> attributionAddresses = new ArrayList<>(endpointDns.addresses);
         if (camouflageDns != null) attributionAddresses.addAll(camouflageDns.addresses);
@@ -129,7 +144,7 @@ final class TrafficLabRunner {
         stages.put(geoConsensus("camouflage.geoConsensus", camouflageDns == null ? Collections.<String>emptyList() : camouflageDns.addresses, attribution, "camouflage-host"));
         stages.put(ProbeSuite.androidTraceroute(endpointDns.addresses.isEmpty() ? profile.host : endpointDns.addresses.get(0)));
         stages.put(JsonUtil.partial("endpoint.tracerouteAttribution", 0, "Android TTL sweep is retained in endpoint.traceroute; per-hop BGP calls are omitted to cap mobile data and runtime.", null));
-        listener.onProgress(40, 0, 0, "attribution and path checks completed");
+        standardProgress.onProgress(40, 0, 0, "attribution and path checks completed");
         checkCanceled();
 
         if (!endpointDns.addresses.isEmpty() && profile.sni != null && ("reality".equals(profile.security) || "tls".equals(profile.security))) {
@@ -144,7 +159,7 @@ final class TrafficLabRunner {
         JsonUtil.put(encoding, "explicitCompatibilityProbe", true);
         stages.put(JsonUtil.passed("profile.packetEncoding", 0, encoding));
         stages.put(ProbeSuite.websocket(profile, endpointDns.addresses.isEmpty() ? profile.host : endpointDns.addresses.get(0)));
-        listener.onProgress(48, 0, 0, "TLS and presentation checked");
+        standardProgress.onProgress(48, 0, 0, "TLS and presentation checked");
 
         JSONArray tunnelExit = new JSONArray();
         JSONArray exitAttribution = new JSONArray();
@@ -156,7 +171,7 @@ final class TrafficLabRunner {
             stages.put(JsonUtil.passed("client.captureScope", 0, JsonUtil.object(
                     "mode", "explicit-app-local-proxy", "systemVpnCreated", false,
                     "interpretation", "Only Traffic Lab requests use loopback inbounds; Android default routes and other apps are unchanged.")));
-            listener.onProgress(62, 0, 0, "embedded Xray core ready");
+            standardProgress.onProgress(62, 0, 0, "embedded Xray core ready");
 
             Proxy httpProxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", session.httpPort));
             tunnelExit = ProbeSuite.exitIps(httpProxy);
@@ -171,7 +186,7 @@ final class TrafficLabRunner {
             JsonUtil.put(authData, "security", profile.security); JsonUtil.put(authData, "interpretation", "A destination response through this isolated core proves the supplied profile completed transport security, VLESS authentication and server outbound as a whole.");
             stages.put(usable ? JsonUtil.passed("tunnel.authenticatedEndToEnd", 0, authData)
                     : JsonUtil.failed("tunnel.authenticatedEndToEnd", 0, "No authenticated destination request completed.", authData));
-            listener.onProgress(72, 0, 0, "authenticated HTTP and exit IP checked");
+            standardProgress.onProgress(72, 0, 0, "authenticated HTTP and exit IP checked");
             checkCanceled();
 
             stages.put(ProbeSuite.socksDomain(session.socksPort));
@@ -184,12 +199,12 @@ final class TrafficLabRunner {
             stages.put(payloadMatrix(httpProxy));
             stages.put(JsonUtil.skipped("tunnel.controlledCanary", "No authorized controlled collector URL is configured in the Android UI."));
             stages.put(ProbeSuite.stability(httpProxy, 3));
-            listener.onProgress(84, 0, 0, "performance and stability checked");
+            standardProgress.onProgress(84, 0, 0, "performance and stability checked");
             stages.put(ProbeSuite.socksUdpDns(session.socksPort));
             stages.put(ProbeSuite.socksStun(session.socksPort));
             stages.put(JsonUtil.skipped("tunnel.quicHandshake", "The APK does not bundle a separate QUIC engine; real UDP and XUDP are tested independently."));
             logs = session.logs();
-            listener.onProgress(90, 0, 0, "UDP and Android tunnel checks completed");
+            standardProgress.onProgress(90, 0, 0, "UDP and Android tunnel checks completed");
         } catch (Exception error) {
             String message = JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage());
             stages.put(JsonUtil.failed("tunnel.coreValidation", 0, message, JsonUtil.object("embeddedBinaryAvailable", xray.binaryAvailable(), "binary", "libxray.so")));
@@ -199,19 +214,40 @@ final class TrafficLabRunner {
         }
         stages.put(logs == null ? JsonUtil.skipped("tunnel.logs", "No running core logs were available.") : JsonUtil.passed("tunnel.logs", 0, logs));
         exitAttribution = ProbeSuite.attribution(ProbeSuite.validExitAddresses(tunnelExit));
-        listener.onProgress(92, 0, 0, "tunnel tests completed");
+        standardProgress.onProgress(92, 0, 0, "tunnel tests completed");
         checkCanceled();
 
         stages.put(negativeControls(profile));
-        listener.onProgress(96, 0, 0, "negative authentication controls completed");
+        standardProgress.onProgress(96, 0, 0, "negative authentication controls completed");
         stages.put(xudpControl(profile));
-        listener.onProgress(98, 0, 0, "XUDP compatibility checked");
+        standardProgress.onProgress(98, 0, 0, "XUDP compatibility checked");
         stages.put(infrastructureSignals(endpointDns, camouflageDns, tunnelExit, stages));
+
+        if (testType.extended()) {
+            if (usable) {
+                extendedStages = AndroidExtendedTestSuite.run(xray, profile, this::checkCanceled,
+                        (percent, message) -> listener.onProgress(60 + (int) Math.round(percent * 0.40), 0, 0, message));
+            } else {
+                extendedStages = skippedExtendedStages("The authenticated standard tunnel stage did not succeed.");
+                listener.onProgress(100, 0, 0, "extended suite skipped because the profile was not usable");
+            }
+        } else {
+            stages.put(JsonUtil.skipped("tunnel.extendedSuite", "Normal test selected. Long-running and disruptive checks require Extended test."));
+        }
 
         JSONArray inferences = buildInferences(profile, endpointDns.addresses, tunnelExit, stages);
         return new ProfileResult(profileId, ordinal, profile.name, profile.fingerprint(), profile.declared(),
                 endpointDns.addresses, camouflageDns == null ? Collections.<String>emptyList() : camouflageDns.addresses,
-                attribution, tunnelExit, exitAttribution, stages, inferences, usable);
+                attribution, tunnelExit, exitAttribution, stages, extendedStages, inferences, usable);
+    }
+
+    private static JSONArray skippedExtendedStages(String reason) {
+        JSONArray stages = new JSONArray();
+        for (String name : new String[]{"tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp",
+                "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.networkInterruption"}) {
+            stages.put(JsonUtil.skipped(name, reason));
+        }
+        return stages;
     }
 
     private JSONObject negativeControls(ConnectionParser.Profile profile) {
@@ -365,25 +401,27 @@ final class TrafficLabRunner {
     static final class ProfileResult {
         final String profileId; final int ordinal; final String name; final String fingerprint; final JSONObject declared;
         final List<String> endpointIps; final List<String> camouflageIps; final JSONArray attribution; final JSONArray tunnelExit;
-        final JSONArray exitAttribution; final JSONArray stages; final JSONArray inferences; final boolean usable;
+        final JSONArray exitAttribution; final JSONArray stages; final JSONArray extendedStages; final JSONArray inferences; final boolean usable;
 
         ProfileResult(String profileId, int ordinal, String name, String fingerprint, JSONObject declared, List<String> endpointIps,
                       List<String> camouflageIps, JSONArray attribution, JSONArray tunnelExit, JSONArray exitAttribution,
-                      JSONArray stages, JSONArray inferences, boolean usable) {
+                      JSONArray stages, JSONArray extendedStages, JSONArray inferences, boolean usable) {
             this.profileId = profileId; this.ordinal = ordinal; this.name = name; this.fingerprint = fingerprint; this.declared = declared;
             this.endpointIps = endpointIps; this.camouflageIps = camouflageIps; this.attribution = attribution; this.tunnelExit = tunnelExit;
-            this.exitAttribution = exitAttribution; this.stages = stages; this.inferences = inferences; this.usable = usable;
+            this.exitAttribution = exitAttribution; this.stages = stages; this.extendedStages = extendedStages; this.inferences = inferences; this.usable = usable;
         }
 
-        static ProfileResult invalid(String id, int ordinal, JSONArray stages) {
-            return new ProfileResult(id, ordinal, "Invalid profile " + ordinal, "unavailable", new JSONObject(), Collections.<String>emptyList(), Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(), stages, new JSONArray().put(inference("profileUsable", "unknown", "low", "URI parsing failed.")), false);
+        static ProfileResult invalid(String id, int ordinal, JSONArray stages, TestType testType) {
+            JSONArray extended = testType != null && testType.extended()
+                    ? skippedExtendedStages("The connection URI could not be parsed.") : new JSONArray();
+            return new ProfileResult(id, ordinal, "Invalid profile " + ordinal, "unavailable", new JSONObject(), Collections.<String>emptyList(), Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(), stages, extended, new JSONArray().put(inference("profileUsable", "unknown", "low", "URI parsing failed.")), false);
         }
     }
 
     static final class RunResult {
-        final File zip; final int profileCount; final long durationMs; final boolean usable; final String startedAt; final String completedAt;
-        RunResult(File zip, int profileCount, long durationMs, boolean usable, String startedAt, String completedAt) {
-            this.zip = zip; this.profileCount = profileCount; this.durationMs = durationMs; this.usable = usable; this.startedAt = startedAt; this.completedAt = completedAt;
+        final File zip; final int profileCount; final long durationMs; final boolean usable; final String startedAt; final String completedAt; final TestType testType;
+        RunResult(File zip, int profileCount, long durationMs, boolean usable, String startedAt, String completedAt, TestType testType) {
+            this.zip = zip; this.profileCount = profileCount; this.durationMs = durationMs; this.usable = usable; this.startedAt = startedAt; this.completedAt = completedAt; this.testType = testType;
         }
     }
 }

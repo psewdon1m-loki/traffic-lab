@@ -51,6 +51,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     private TextView time;
     private ProgressBar progress;
     private Button start;
+    private Button extended;
     private Button paste;
     private Button clear;
     private Button save;
@@ -58,13 +59,17 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     private TrafficLabService service;
     private boolean bound;
     private ArrayList<String> pendingStart;
+    private TrafficLabRunner.TestType pendingTestType = TrafficLabRunner.TestType.NORMAL;
     private File latestZip;
     private TrafficLabService.State latestState;
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             service = ((TrafficLabService.LocalBinder) binder).service(); bound = true; service.setListener(MainActivity.this);
-            if (pendingStart != null) { ArrayList<String> copy = pendingStart; pendingStart = null; service.startTests(copy); }
+            if (pendingStart != null) {
+                ArrayList<String> copy = pendingStart; TrafficLabRunner.TestType type = pendingTestType;
+                pendingStart = null; pendingTestType = TrafficLabRunner.TestType.NORMAL; service.startTests(copy, type);
+            }
         }
         @Override public void onServiceDisconnected(ComponentName name) { bound = false; service = null; }
     };
@@ -115,7 +120,9 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); progress.setMax(100); progress.setProgress(0);
         progressCard.addView(progress, params(-1, dp(18), 0, 12, 0, 6));
         time = text("Elapsed 00:00:00 · ETA --:--:--", 13, Color.rgb(82, 92, 116)); progressCard.addView(time);
-        start = button("Start test", false); progressCard.addView(start, params(-1, dp(52), 0, 14, 0, 0));
+        start = button("Start test", false); extended = button("Extended test", true);
+        LinearLayout testButtons = row(); testButtons.addView(start, params(0, dp(52), 1, 0, 6, 0));
+        testButtons.addView(extended, params(0, dp(52), 1, 6, 0, 0)); progressCard.addView(testButtons, params(-1, -2, 0, 14, 0, 0));
 
         LinearLayout exportCard = card(); root.addView(exportCard, params(-1, -2, 0, 0, 0, 0));
         TextView resultTitle = text("Result export", 18, Color.rgb(25, 35, 61)); resultTitle.setTypeface(Typeface.DEFAULT_BOLD); exportCard.addView(resultTitle);
@@ -125,7 +132,9 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         LinearLayout exportButtons = row(); exportButtons.addView(save, params(0, dp(48), 1, 0, 6, 0)); exportButtons.addView(share, params(0, dp(48), 1, 6, 0, 0)); exportCard.addView(exportButtons);
 
         paste.setOnClickListener(view -> pasteClipboard()); clear.setOnClickListener(view -> clearEverything());
-        start.setOnClickListener(view -> startOrStop()); save.setOnClickListener(view -> saveZip()); share.setOnClickListener(view -> shareZip());
+        start.setOnClickListener(view -> startOrStop(TrafficLabRunner.TestType.NORMAL));
+        extended.setOnClickListener(view -> startOrStop(TrafficLabRunner.TestType.EXTENDED));
+        save.setOnClickListener(view -> saveZip()); share.setOnClickListener(view -> shareZip());
         connections.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             public void onTextChanged(CharSequence s, int start, int before, int count) { updateCount(); }
@@ -146,13 +155,24 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         toast("Imported " + imported.size() + " connection(s)");
     }
 
-    private void startOrStop() {
+    private void startOrStop(TrafficLabRunner.TestType testType) {
         if (latestState != null && latestState.running()) {
             new AlertDialog.Builder(this).setTitle("Stop testing early?")
                     .setMessage("This is an emergency stop. The current temporary result will not be exported.")
                     .setNegativeButton("Continue testing", null).setPositiveButton("Stop", (dialog, which) -> { if (service != null) service.cancelTests(); }).show();
             return;
         }
+        if (testType.extended()) {
+            new AlertDialog.Builder(this).setTitle("Start extended test?")
+                    .setMessage("Extended test normally takes 5–10 minutes per connection. It runs parallel TCP/UDP flows, a five-minute soak and intentionally restarts only Traffic Lab's isolated Xray process. Android routes, radios and other applications are not changed.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Start extended test", (dialog, which) -> prepareStart(testType)).show();
+            return;
+        }
+        prepareStart(testType);
+    }
+
+    private void prepareStart(TrafficLabRunner.TestType testType) {
         ArrayList<String> links = new ArrayList<>(ConnectionParser.extractLinks(connections.getText().toString()));
         if (links.isEmpty()) { toast("Paste at least one vless:// connection"); return; }
         if (AndroidNetworkDiagnostics.hasActiveVpn(this)) {
@@ -164,7 +184,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
                     }).show();
             return;
         }
-        pendingStart = links;
+        pendingStart = links; pendingTestType = testType;
         List<String> missing = missingPermissions();
         if (!missing.isEmpty()) requestPermissions(missing.toArray(new String[0]), REQUEST_PERMISSIONS); else beginPendingTest();
     }
@@ -190,7 +210,10 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         if (pendingStart == null) return;
         Intent intent = new Intent(this, TrafficLabService.class);
         startForegroundService(intent);
-        if (bound && service != null) { ArrayList<String> copy = pendingStart; pendingStart = null; service.startTests(copy); }
+        if (bound && service != null) {
+            ArrayList<String> copy = pendingStart; TrafficLabRunner.TestType type = pendingTestType;
+            pendingStart = null; pendingTestType = TrafficLabRunner.TestType.NORMAL; service.startTests(copy, type);
+        }
         else bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
     }
 
@@ -232,7 +255,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
 
     private void render(TrafficLabService.State state) {
         latestState = state; progress.setProgress(state.percent); status.setText(state.message + (state.total > 0 ? " · " + state.completed + "/" + state.total : ""));
-        boolean running = state.running(); connections.setEnabled(!running); paste.setEnabled(!running); clear.setEnabled(!running);
+        boolean running = state.running(); connections.setEnabled(!running); paste.setEnabled(!running); clear.setEnabled(!running); extended.setEnabled(!running);
         start.setText(running ? "Stop test" : "Start test"); latestZip = state.zip;
         save.setEnabled(state.completed() && latestZip != null && latestZip.isFile()); share.setEnabled(save.isEnabled());
         updateTime();
@@ -246,7 +269,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         TrafficLabService.State state = latestState;
         if (state == null || state.startedAtMs == 0) { time.setText("Elapsed 00:00:00 · ETA --:--:--"); return; }
         long elapsed = state.running() ? System.currentTimeMillis() - state.startedAtMs : state.durationMs;
-        long eta = state.running() && state.percent > 2 ? elapsed * (100L - state.percent) / state.percent : -1;
+        long eta = ProgressEstimate.remaining(elapsed, state.percent, state.total, state.running(), state.testType);
         time.setText("Elapsed " + duration(elapsed) + " · ETA " + (eta < 0 ? "--:--:--" : duration(eta)));
     }
 

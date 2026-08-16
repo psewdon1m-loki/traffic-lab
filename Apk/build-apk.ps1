@@ -1,6 +1,6 @@
 param(
     [string]$XrayVersion = "25.10.15",
-    [string]$Version = "3.1.3",
+    [string]$Version = "3.2.0",
     [int]$VersionCode = 0,
     [switch]$InstallEmulator,
     [switch]$SkipTests
@@ -132,8 +132,12 @@ foreach ($abi in $abis) {
 $tasks = @("--no-daemon", "--stacktrace")
 if (-not $SkipTests) { $tasks += @("testDebugUnitTest", "lintDebug") }
 $tasks += @("lintRelease", "assembleRelease")
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $gradle -p $apkRoot @tasks
-if ($LASTEXITCODE -ne 0) { throw "Android Gradle build failed with exit code $LASTEXITCODE." }
+$gradleExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorActionPreference
+if ($gradleExitCode -ne 0) { throw "Android Gradle build failed with exit code $gradleExitCode." }
 
 $builtApk = Join-Path $apkRoot "app\build\outputs\apk\release\app-release.apk"
 if (-not (Test-Path -LiteralPath $builtApk)) { throw "Built APK was not found: $builtApk" }
