@@ -90,7 +90,9 @@ jobs:
           & $app --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Published Windows self-test failed.' }
           Copy-Item (Join-Path $out 'LokiTrafficLab-win-x64/manifest.json') (Join-Path $out 'windows-manifest.json') -Force
-          $zip = Get-ChildItem $out -Filter 'LokiTrafficLab-windows-x64-*.zip' | Select-Object -Single
+          $zips = @(Get-ChildItem $out -Filter 'LokiTrafficLab-windows-x64-*.zip')
+          if ($zips.Count -ne 1) { throw "Expected exactly one Windows ZIP, found $($zips.Count)." }
+          $zip = $zips[0]
           $expected = ((Get-Content "$($zip.FullName).sha256" -Raw) -split '\s+')[0]
           $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($expected -ne $actual) { throw 'Windows archive checksum verification failed.' }
@@ -184,7 +186,9 @@ jobs:
           $project = Get-Content 'src/TrafficLab.ProfileRunner/TrafficLab.ProfileRunner.csproj' -Raw
           $version = [regex]::Match($project, '<Version>([^<]+)</Version>').Groups[1].Value
           & './Apk/build-apk.ps1' -XrayVersion $env:X_RAY_VERSION -Version $version
-          $apk = Get-ChildItem './Apk/releases' -Filter "LokiTrafficLab-android-$version.apk" | Select-Object -Single
+          $apks = @(Get-ChildItem './Apk/releases' -Filter "LokiTrafficLab-android-$version.apk")
+          if ($apks.Count -ne 1) { throw "Expected exactly one APK, found $($apks.Count)." }
+          $apk = $apks[0]
           $apksigner = './Apk/.android-sdk/build-tools/35.0.0/apksigner.bat'
           $aapt = './Apk/.android-sdk/build-tools/35.0.0/aapt.exe'
           & $apksigner verify --verbose --print-certs $apk.FullName
