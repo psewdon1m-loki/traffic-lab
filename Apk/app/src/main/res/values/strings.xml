@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Loki Traffic Lab</string>
+    <string name="notification_channel">Network tests</string>
+</resources>

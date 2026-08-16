@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_DIR="${TLAB_APP_DIR:-/opt/tlab/current}"
+APP_BIN="${APP_DIR}/LokiTrafficLab"
+XRAY_BIN="${APP_DIR}/xray"
+export LD_LIBRARY_PATH="${APP_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tlab"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/tlab"
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/tlab"
+DEFAULT_CONNECTIONS="${TLAB_CONNECTIONS_FILE:-${CONFIG_DIR}/connections.txt}"
+DEFAULT_RESULTS="${TLAB_RESULTS_DIR:-${DATA_DIR}/results}"
+PID_FILE="${STATE_DIR}/tlab.pid"
+LOG_PATH_FILE="${STATE_DIR}/tlab.log-path"
+RESULT_PATH_FILE="${STATE_DIR}/tlab.result-path"
+PORT_FILE="${STATE_DIR}/tlab.port"
+PROGRESS_PATH_FILE="${STATE_DIR}/tlab.progress-path"
+
+usage() {
+  cat <<'EOF'
+Loki Traffic Lab for Linux
+
+Usage:
+  tlab start [--port PORT] [--detach] [--connections FILE]
+             [--outdir DIR] [--plan FILE] [runner options]
+  tlab extended [--port PORT] [--detach] [--connections FILE]
+                [--outdir DIR] [--plan FILE] [runner options]
+  tlab stop
+  tlab status
+  tlab logs [--follow]
+  tlab self-test
+  tlab raw <native Traffic Lab command and arguments>
+
+`tlab start` runs the normal suite. `tlab extended` additionally runs the long
+soak, cold/warm, parallel TCP/UDP, DNS recovery, forced reconnect and a
+process-scoped Xray interruption. Both commands stay attached by default,
+render one stable progress line and print the final archive summary. --detach
+is optional. The selected port is loopback-only. Traffic Lab never disables or
+flushes UFW and does not inspect or stop unrelated proxy/VPN services. Use stop
+only for emergency interruption.
+EOF
+}
+
+ensure_layout() {
+  mkdir -p -- "$CONFIG_DIR" "$STATE_DIR" "$DEFAULT_RESULTS"
+  chmod 700 "$CONFIG_DIR" "$STATE_DIR" 2>/dev/null || true
+  if [[ ! -e "$DEFAULT_CONNECTIONS" && -f "$APP_DIR/connections.txt.example" ]]; then
+    install -m 0600 "$APP_DIR/connections.txt.example" "$DEFAULT_CONNECTIONS"
+  fi
+}
+
+read_pid() {
+  [[ -r "$PID_FILE" ]] || return 1
+  local value
+  value="$(<"$PID_FILE")"
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+process_matches() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+  tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Fq -- "$APP_BIN"
+}
+
+running_pid() {
+  local pid
+  pid="$(read_pid)" || return 1
+  process_matches "$pid" || return 1
+  printf '%s\n' "$pid"
+}
+
+latest_zip() {
+  local result_dir="${1:-$DEFAULT_RESULTS}"
+  local matches=("$result_dir"/traffic-lab-results-*.zip)
+  [[ -e "${matches[0]}" ]] || return 1
+  ls -1t -- "${matches[@]}" 2>/dev/null | head -n 1
+}
+
+validate_port() {
+  [[ "$1" =~ ^[0-9]{4,5}$ ]] && (( 10#$1 >= 1024 && 10#$1 <= 65535 ))
+}
+
+port_is_listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+active_connection_count() {
+  awk 'BEGIN { count=0 } /^[[:space:]]*($|#|;|\/\/)/ { next } { count++ } END { print count }' "$1"
+}
+
+format_duration() {
+  local total="${1:-0}"
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  printf '%02d:%02d:%02d' "$((total / 3600))" "$(((total % 3600) / 60))" "$((total % 60))"
+}
+
+monitor_progress() {
+  local pid="$1" progress_file="$2" expected_total="$3" started_epoch="$4"
+  local state="running" percent=0 completed=0 total="$expected_total" reported_elapsed=0 message="starting" archive=""
+  local last_non_tty_percent=-1 width=20 filled empty eta now elapsed cols message_width short_message bar
+  while process_matches "$pid"; do
+    if [[ -r "$progress_file" ]]; then
+      IFS=$'\t' read -r state percent completed total reported_elapsed message archive <"$progress_file" || true
+    fi
+    [[ "$percent" =~ ^[0-9]+$ ]] || percent=0
+    [[ "$completed" =~ ^[0-9]+$ ]] || completed=0
+    [[ "$total" =~ ^[0-9]+$ ]] || total="$expected_total"
+    now="$(date +%s)"
+    elapsed="$((now - started_epoch))"
+    (( percent < 0 )) && percent=0
+    (( percent > 99 )) && percent=99
+    filled="$((percent * width / 100))"
+    empty="$((width - filled))"
+    if (( percent > 2 )); then eta="$((elapsed * (100 - percent) / percent))"; else eta=0; fi
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+    if [[ -t 1 ]]; then
+      cols="$(tput cols 2>/dev/null || printf '80')"
+      [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+      message_width="$((cols - width - 39))"
+      (( message_width < 8 )) && message_width=8
+      short_message="${message:0:message_width}"
+      printf '\r\033[2K[%s] %3d%% %d/%d %s ETA %s %-*s' \
+        "$bar" "$percent" "$completed" "$total" "$(format_duration "$elapsed")" "$(format_duration "$eta")" "$message_width" "$short_message"
+    elif (( percent != last_non_tty_percent )); then
+      printf '[%s] %3d%% | %d/%d | %s | elapsed %s\n' "$bar" "$percent" "$completed" "$total" "$message" "$(format_duration "$elapsed")"
+      last_non_tty_percent="$percent"
+    fi
+    sleep 0.5
+  done
+  if [[ -r "$progress_file" ]]; then
+    IFS=$'\t' read -r state percent completed total reported_elapsed message archive <"$progress_file" || true
+  fi
+  [[ "$percent" =~ ^[0-9]+$ ]] || percent=0
+  [[ "$completed" =~ ^[0-9]+$ ]] || completed=0
+  [[ "$total" =~ ^[0-9]+$ ]] || total="$expected_total"
+  now="$(date +%s)"
+  elapsed="$((now - started_epoch))"
+  if [[ -t 1 ]]; then
+    if (( percent >= 100 )); then
+      cols="$(tput cols 2>/dev/null || printf '80')"
+      [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+      message_width="$((cols - width - 39))"
+      (( message_width < 8 )) && message_width=8
+      short_message="${message:0:message_width}"
+      bar="$(printf '%*s' "$width" '' | tr ' ' '#')"
+      printf '\r\033[2K[%s] 100%% %d/%d %s ETA 00:00:00 %-*s\n' \
+        "$bar" "$completed" "$total" "$(format_duration "$elapsed")" "$message_width" "$short_message"
+    else
+      printf '\r\033[2K'
+    fi
+  elif (( percent >= 100 && last_non_tty_percent != 100 )); then
+    bar="$(printf '%*s' "$width" '' | tr ' ' '#')"
+    printf '[%s] 100%% | %d/%d | %s | elapsed %s\n' \
+      "$bar" "$completed" "$total" "$message" "$(format_duration "$elapsed")"
+  fi
+}
+
+command_start() {
+  local test_type="$1"
+  shift
+  ensure_layout
+  if pid="$(running_pid 2>/dev/null)"; then
+    printf 'Traffic Lab is already running (PID %s).\n' "$pid" >&2
+    exit 3
+  fi
+
+  local port="" connections="$DEFAULT_CONNECTIONS" outdir="$DEFAULT_RESULTS" plan="" detach=0
+  local -a extra=()
+  while (($#)); do
+    case "$1" in
+      --port) [[ $# -ge 2 ]] || { echo '--port requires a value.' >&2; exit 2; }; port="$2"; shift 2 ;;
+      --connections) [[ $# -ge 2 ]] || { echo '--connections requires a file.' >&2; exit 2; }; connections="$2"; shift 2 ;;
+      --outdir) [[ $# -ge 2 ]] || { echo '--outdir requires a directory.' >&2; exit 2; }; outdir="$2"; shift 2 ;;
+      --plan) [[ $# -ge 2 ]] || { echo '--plan requires a file.' >&2; exit 2; }; plan="$2"; shift 2 ;;
+      --foreground) detach=0; shift ;;
+      --detach) detach=1; shift ;;
+      --) shift; extra+=("$@"); break ;;
+      *) extra+=("$1"); shift ;;
+    esac
+  done
+
+  if [[ -z "$port" ]]; then
+    if [[ ! -t 0 ]]; then
+      echo 'No interactive terminal is available; pass --port 1024..65535.' >&2
+      exit 2
+    fi
+    read -r -p 'Local loopback test port [18080]: ' port
+    port="${port:-18080}"
+  fi
+  validate_port "$port" || { echo 'Port must be an integer from 1024 through 65535.' >&2; exit 2; }
+  port="$((10#$port))"
+  port_is_listening "$port" && { printf 'Port 127.0.0.1:%s is already in use.\n' "$port" >&2; exit 3; }
+
+  [[ -x "$APP_BIN" ]] || { printf 'Traffic Lab executable not found: %s\n' "$APP_BIN" >&2; exit 2; }
+  [[ -x "$XRAY_BIN" ]] || { printf 'Xray executable not found: %s\n' "$XRAY_BIN" >&2; exit 2; }
+  [[ -r "$connections" ]] || { printf 'Connections file is not readable: %s\n' "$connections" >&2; exit 2; }
+  local connection_count
+  connection_count="$(active_connection_count "$connections")"
+  (( connection_count > 0 )) || {
+    printf 'No active connections in %s. Add one VLESS URI per line.\n' "$connections" >&2
+    exit 2
+  }
+  [[ -z "$plan" || -r "$plan" ]] || { printf 'Test plan is not readable: %s\n' "$plan" >&2; exit 2; }
+
+  mkdir -p -- "$outdir" "$STATE_DIR"
+  local stamp log progress_file started_epoch
+  stamp="$(date -u +%Y%m%d-%H%M%S)"
+  log="$STATE_DIR/tlab-$stamp.log"
+  progress_file="$STATE_DIR/tlab-$stamp.progress"
+  started_epoch="$(date +%s)"
+  printf 'running\t0\t0\t%s\t0\tstarting\t\n' "$connection_count" >"$progress_file"
+  local -a command_args=(run --connections "$connections" --xray "$XRAY_BIN" --outdir "$outdir" --local-port "$port" --progress-file "$progress_file" --test-type "$test_type")
+  [[ -z "$plan" ]] || command_args+=(--plan "$plan")
+  command_args+=("${extra[@]}")
+  if [[ -z "$plan" ]]; then
+    command_args+=(--dns-attempts 3 --tcp-attempts 5 --stability-attempts 10 --negative-controls --xudp)
+  fi
+
+  printf '%s\n' "$log" >"$LOG_PATH_FILE"
+  printf '%s\n' "$outdir" >"$RESULT_PATH_FILE"
+  printf '%s\n' "$port" >"$PORT_FILE"
+  printf '%s\n' "$progress_file" >"$PROGRESS_PATH_FILE"
+  chmod 600 "$LOG_PATH_FILE" "$RESULT_PATH_FILE" "$PORT_FILE" "$PROGRESS_PATH_FILE" "$progress_file"
+
+  echo "Starting Traffic Lab: type=$test_type, profiles=$connection_count, local-port=127.0.0.1:$port"
+  echo 'UFW is not modified; the selected port is never bound to a public interface.'
+  setsid "$APP_BIN" "${command_args[@]}" >>"$log" 2>&1 </dev/null &
+  local pid=$!
+  printf '%s\n' "$pid" >"$PID_FILE"
+  chmod 600 "$PID_FILE"
+  sleep 0.4
+  if ! process_matches "$pid"; then
+    echo 'Traffic Lab failed to start. Last log lines:' >&2
+    tail -n 30 "$log" >&2 || true
+    rm -f -- "$PID_FILE"
+    exit 1
+  fi
+
+  printf 'Traffic Lab PID: %s\nLog: %s\nResults: %s\n' "$pid" "$log" "$outdir"
+  if (( detach )); then
+    echo 'Detached mode enabled. Use `tlab status`, `tlab logs --follow`, or emergency `tlab stop`.'
+    return 0
+  fi
+
+  trap 'printf "\r\033[2K\nInterruption requested; stopping only Traffic Lab...\n"; command_stop; exit 130' INT TERM
+  monitor_progress "$pid" "$progress_file" "$connection_count" "$started_epoch"
+  set +e
+  wait "$pid"
+  local rc=$?
+  set -e
+  trap - INT TERM
+  rm -f -- "$PID_FILE"
+
+  local final_state="" final_percent=0 final_completed=0 final_total="$connection_count" final_elapsed="$(( $(date +%s) - started_epoch ))" final_message="" final_archive=""
+  if [[ -r "$progress_file" ]]; then
+    IFS=$'\t' read -r final_state final_percent final_completed final_total final_elapsed final_message final_archive <"$progress_file" || true
+  fi
+  [[ "$final_completed" =~ ^[0-9]+$ ]] || final_completed="$connection_count"
+  [[ "$final_elapsed" =~ ^[0-9]+$ ]] || final_elapsed="$(( $(date +%s) - started_epoch ))"
+  if [[ -z "$final_archive" ]]; then final_archive="$(latest_zip "$outdir" 2>/dev/null || true)"; fi
+
+  echo
+  if (( rc == 0 )); then
+    echo 'Testing completed successfully.'
+  else
+    printf 'Testing completed with errors (exit code %s). See log: %s\n' "$rc" "$log" >&2
+  fi
+  printf 'Test type: %s\n' "$test_type"
+  printf 'Connections tested: %s\n' "$final_completed"
+  printf 'Elapsed time: %s\n' "$(format_duration "$final_elapsed")"
+  printf 'Result archive: %s\n' "${final_archive:-not-created}"
+  return "$rc"
+}
+
+command_stop() {
+  ensure_layout
+  local pid
+  if ! pid="$(running_pid 2>/dev/null)"; then
+    echo 'Traffic Lab is not running.'
+    rm -f -- "$PID_FILE"
+    return 0
+  fi
+  printf 'Stopping Traffic Lab process group %s...\n' "$pid"
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  local deadline=$((SECONDS + 15))
+  while process_matches "$pid" && (( SECONDS < deadline )); do sleep 0.2; done
+  if process_matches "$pid"; then
+    echo 'Grace period expired; forcing only the Traffic Lab process group.' >&2
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f -- "$PID_FILE"
+  echo 'Traffic Lab stopped.'
+}
+
+command_status() {
+  ensure_layout
+  local outdir="$DEFAULT_RESULTS"
+  [[ ! -r "$RESULT_PATH_FILE" ]] || outdir="$(<"$RESULT_PATH_FILE")"
+  if pid="$(running_pid 2>/dev/null)"; then
+    printf 'status: running\npid: %s\n' "$pid"
+    [[ ! -r "$PORT_FILE" ]] || printf 'local test port: 127.0.0.1:%s\n' "$(<"$PORT_FILE")"
+  else
+    echo 'status: stopped'
+    rm -f -- "$PID_FILE"
+  fi
+  [[ ! -r "$LOG_PATH_FILE" ]] || printf 'log: %s\n' "$(<"$LOG_PATH_FILE")"
+  if zip="$(latest_zip "$outdir" 2>/dev/null)"; then printf 'latest result ZIP: %s\n' "$zip"; fi
+}
+
+command_logs() {
+  ensure_layout
+  [[ -r "$LOG_PATH_FILE" ]] || { echo 'No Traffic Lab log has been registered yet.' >&2; exit 2; }
+  local log
+  log="$(<"$LOG_PATH_FILE")"
+  [[ -r "$log" ]] || { printf 'Log is not readable: %s\n' "$log" >&2; exit 2; }
+  if [[ "${1:-}" == "--follow" ]]; then tail -n 80 -f "$log"; else tail -n 80 "$log"; fi
+}
+
+command_self_test() {
+  [[ -x "$APP_BIN" ]] || { printf 'Traffic Lab executable not found: %s\n' "$APP_BIN" >&2; exit 2; }
+  "$APP_BIN" --self-test
+  "$APP_BIN" collector --self-test
+}
+
+command_raw() {
+  [[ -x "$APP_BIN" ]] || { printf 'Traffic Lab executable not found: %s\n' "$APP_BIN" >&2; exit 2; }
+  exec "$APP_BIN" "$@"
+}
+
+case "${1:-help}" in
+  start) shift; command_start normal "$@" ;;
+  extended) shift; command_start extended "$@" ;;
+  stop) shift; command_stop "$@" ;;
+  status) shift; command_status "$@" ;;
+  logs) shift; command_logs "$@" ;;
+  self-test) shift; command_self_test "$@" ;;
+  raw) shift; command_raw "$@" ;;
+  help|--help|-h) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

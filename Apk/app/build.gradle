@@ -1,0 +1,66 @@
+plugins {
+    id 'com.android.application'
+}
+
+def trafficLabVersionName = providers.environmentVariable('TLAB_VERSION_NAME').orElse('3.1.2').get()
+def trafficLabVersionCode = providers.environmentVariable('TLAB_VERSION_CODE').orElse('3001002').get().toInteger()
+if (!(trafficLabVersionName ==~ /[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/)) {
+    throw new GradleException("TLAB_VERSION_NAME must be a semantic version, got: ${trafficLabVersionName}")
+}
+if (trafficLabVersionCode < 1) {
+    throw new GradleException('TLAB_VERSION_CODE must be positive.')
+}
+
+android {
+    namespace 'com.loki.trafficlab'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.loki.trafficlab'
+        minSdk 26
+        targetSdk 35
+        versionCode trafficLabVersionCode
+        versionName trafficLabVersionName
+
+        testInstrumentationRunner 'android.app.Instrumentation'
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
+            keepDebugSymbols += ['**/libxray.so']
+        }
+        resources {
+            excludes += ['/META-INF/{AL2.0,LGPL2.1}']
+        }
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}

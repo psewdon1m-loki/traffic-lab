@@ -1,0 +1,218 @@
+package com.loki.trafficlab;
+
+import android.content.Context;
+import android.os.Build;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+final class ResultPackager {
+    private ResultPackager() {}
+
+    static File create(Context context, PackageInput input) throws Exception {
+        File directory = new File(context.getCacheDir(), "results");
+        deleteTree(directory);
+        if (!directory.mkdirs() && !directory.isDirectory()) throw new IllegalStateException("Could not create result cache");
+        String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date());
+        File zip = new File(directory, "traffic-lab-android-results-" + stamp + "-" + input.runId.substring(input.runId.length() - 8) + ".zip");
+        Map<String, List<String>> shared = sharedBackends(input.profiles);
+        Set<String> folders = new HashSet<>();
+        try (ZipOutputStream output = new ZipOutputStream(new FileOutputStream(zip), StandardCharsets.UTF_8)) {
+            output.setLevel(9);
+            for (TrafficLabRunner.ProfileResult profile : input.profiles) {
+                String prefix = input.profiles.size() == 1 ? "" : uniqueFolder(profile, folders) + "/";
+                write(output, prefix + "connection.json", connectionJson(input, profile, shared).toString(2));
+                write(output, prefix + "local-machine.json", localJson(input, profile).toString(2));
+                write(output, prefix + "osi-map.md", osiMap(input, profile));
+                write(output, prefix + "README.txt", readme(input, profile));
+            }
+        }
+        return zip;
+    }
+
+    private static JSONObject connectionJson(PackageInput input, TrafficLabRunner.ProfileResult profile, Map<String, List<String>> shared) {
+        JSONObject root = base(input, "connection-characteristics");
+        JSONObject connection = new JSONObject();
+        JsonUtil.put(connection, "profileId", profile.profileId); JsonUtil.put(connection, "sourceOrdinal", profile.ordinal);
+        JsonUtil.put(connection, "name", profile.name); JsonUtil.put(connection, "profileFingerprint", profile.fingerprint);
+        JsonUtil.put(connection, "declared", profile.declared); JsonUtil.put(connection, "observedEndpointIps", JsonUtil.array(profile.endpointIps));
+        JsonUtil.put(connection, "observedCamouflageIps", JsonUtil.array(profile.camouflageIps));
+        JsonUtil.put(connection, "exitAttribution", profile.exitAttribution); JsonUtil.put(connection, "stages", profile.stages);
+        JsonUtil.put(connection, "statusCounts", statusCounts(profile.stages)); JsonUtil.put(connection, "inferences", profile.inferences);
+        JSONArray sharedRows = new JSONArray();
+        for (Map.Entry<String, List<String>> entry : shared.entrySet()) if (entry.getValue().contains(profile.profileId)) {
+            sharedRows.put(JsonUtil.object("ip", entry.getKey(), "profileIds", JsonUtil.array(entry.getValue())));
+        }
+        JsonUtil.put(connection, "sharedHostnameBackends", sharedRows); JsonUtil.put(root, "connection", connection);
+        JSONObject comparison = new JSONObject(); JsonUtil.put(comparison, "directPublicIps", JsonUtil.array(ProbeSuite.validExitAddresses(input.directExit)));
+        JsonUtil.put(comparison, "tunnelExitIps", JsonUtil.array(ProbeSuite.validExitAddresses(profile.tunnelExit))); JsonUtil.put(comparison, "ingressIps", JsonUtil.array(profile.endpointIps));
+        JsonUtil.put(root, "directVersusTunnel", comparison);
+        JsonUtil.put(root, "probabilityNotice", "Percentages and confidence labels are conservative heuristic evidence weights, not calibrated statistical probabilities.");
+        JsonUtil.put(root, "limitations", commonLimitations());
+        return root;
+    }
+
+    private static JSONObject localJson(PackageInput input, TrafficLabRunner.ProfileResult profile) {
+        JSONObject root = base(input, "local-machine-and-network-characteristics");
+        JsonUtil.put(root, "appliesTo", JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal, "name", profile.name, "profileFingerprint", profile.fingerprint));
+        JsonUtil.put(root, "node", input.node); JsonUtil.put(root, "publicIpObservations", input.directExit);
+        JsonUtil.put(root, "publicIpAttribution", input.directAttribution);
+        JsonUtil.put(root, "androidSpecificCoverage", new JSONArray()
+                .put("NetworkCapabilities transports/validation/captive/metered/roaming/bandwidth")
+                .put("LinkProperties routes, MTU, DNS, Private DNS, NAT64 and HTTP proxy")
+                .put("Wi-Fi standard, frequency, RSSI and negotiated link rates")
+                .put("Cellular LTE/NR type, carrier/SIM summaries and signal levels without subscriber identifiers")
+                .put("Battery saver, idle mode, Data Saver and airplane mode"));
+        JsonUtil.put(root, "probabilityNotice", "IP location, NAT layers and provider identity are bounded external inferences. Precise device/cell location is not collected.");
+        return root;
+    }
+
+    private static JSONObject base(PackageInput input, String outputType) {
+        JSONObject root = new JSONObject(); JsonUtil.put(root, "schemaVersion", "1.0"); JsonUtil.put(root, "outputType", outputType);
+        JsonUtil.put(root, "generatedAt", JsonUtil.now());
+        JSONObject run = new JSONObject(); JsonUtil.put(run, "runId", input.runId); JsonUtil.put(run, "startedAt", input.startedAt);
+        JsonUtil.put(run, "completedAt", input.completedAt); JsonUtil.put(run, "durationMs", input.durationMs);
+        JsonUtil.put(run, "platform", "Android"); JsonUtil.put(run, "executionOrder", "sequential");
+        JsonUtil.put(run, "inputSource", "in-app clipboard/import field"); JsonUtil.put(root, "run", run);
+        JSONObject tool = new JSONObject(); JsonUtil.put(tool, "name", "Loki Traffic Lab Android"); JsonUtil.put(tool, "version", "1.0.0");
+        JsonUtil.put(tool, "embeddedXrayVersion", input.xrayVersion); JsonUtil.put(tool, "abi", Build.SUPPORTED_ABIS[0]); JsonUtil.put(root, "tool", tool);
+        return root;
+    }
+
+    private static String osiMap(PackageInput input, TrafficLabRunner.ProfileResult profile) {
+        JSONObject connectivity = input.node.optJSONObject("connectivity");
+        String access = connectivity == null ? "unknown" : connectivity.optString("detectedAccessType", "unknown");
+        String local = connectivity == null || connectivity.optJSONObject("link") == null ? "unknown" : connectivity.optJSONObject("link").optJSONArray("addresses").toString();
+        String publicIps = ProbeSuite.validExitAddresses(input.directExit).toString();
+        String exitIps = ProbeSuite.validExitAddresses(profile.tunnelExit).toString();
+        return "# Loki Traffic Lab — Android OSI evidence map\n\n"
+                + "Profile: " + safeMarkdown(profile.name) + " (`" + profile.profileId + "`)  \n"
+                + "Generated: " + input.completedAt + "\n\n"
+                + "| OSI | Layer | Observed Android evidence | Confidence / limits |\n"
+                + "|---:|---|---|---|\n"
+                + "| 1 | Physical | Access=`" + access + "`; Wi-Fi/cellular radio and negotiated rate are in local-machine.json. | Medium; Android cannot identify cable plant or LTE tower from an ordinary app. |\n"
+                + "| 2 | Data link | Hashed SSID/BSSID/MAC, Wi-Fi standard/frequency/RSSI and active interface. | Medium; VLAN and upstream carrier L2 remain hidden. |\n"
+                + "| 3 | Network | Local=" + safeMarkdown(local) + "; public=" + safeMarkdown(publicIps) + "; endpoint=" + safeMarkdown(profile.endpointIps.toString()) + ". | High for observed IPs/routes; IP geolocation is low confidence. |\n"
+                + "| 4 | Transport | Repeated TCP, tunneled UDP DNS, MTU/payload sweep, RTT/timeouts. | High for responses; firewalls and QUIC internals remain inferential. |\n"
+                + "| 5 | Session | Isolated VLESS session, stability and negative UUID/shortId/SNI controls. | High for end-to-end success; panel/HWID state is private. |\n"
+                + "| 6 | Presentation | TLS/REALITY SNI, TLS version, cipher, ALPN and certificate/SPKI hashes. | Medium/high; exact REALITY target remains server-side. |\n"
+                + "| 7 | Application | DNS variants, HTTP, exit IP, SOCKS remote-domain DNS, upload/download and payload sizes. | High for measured requests. |\n\n"
+                + "```mermaid\nflowchart LR\n"
+                + "  A[\"Android app / explicit loopback proxy\"] --> B[\"" + escapeMermaid(access) + " network / gateway\"]\n"
+                + "  B --> C[\"ISP / NAT / public " + escapeMermaid(publicIps) + "\"]\n"
+                + "  C --> D[\"VLESS entry " + escapeMermaid(profile.endpointIps.toString()) + "\"]\n"
+                + "  D --> E[\"Authenticated server path / hidden routing\"]\n"
+                + "  E --> F[\"Exit " + escapeMermaid(exitIps) + "\"]\n"
+                + "  F --> G[\"DNS / HTTP / STUN test services\"]\nend\n```\n";
+    }
+
+    private static String readme(PackageInput input, TrafficLabRunner.ProfileResult profile) {
+        JSONObject counts = statusCounts(profile.stages);
+        return "LOKI TRAFFIC LAB - ANDROID TEST RESULT PACKAGE\n"
+                + "================================================\n\n"
+                + "Run ID: " + input.runId + "\n"
+                + "Test started (UTC): " + input.startedAt + "\n"
+                + "Test completed (UTC): " + input.completedAt + "\n"
+                + "Duration: " + formatDuration(input.durationMs) + "\n"
+                + "Device local timezone: " + TimeZone.getDefault().getID() + "\n"
+                + "Platform: Android " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT + "\n"
+                + "Device: " + Build.MANUFACTURER + " " + Build.MODEL + "\n"
+                + "ABI: " + Build.SUPPORTED_ABIS[0] + "\n"
+                + "Tool: Loki Traffic Lab Android 1.0.0\n"
+                + "Core: " + input.xrayVersion + "\n"
+                + "Connections loaded/scheduled: " + input.profiles.size() + "/" + input.profiles.size() + "\n"
+                + "Execution order: sequential\n"
+                + "Input source: in-app text parsed from clipboard\n\n"
+                + "CONNECTION\n----------\n"
+                + "Profile ID/order: " + profile.profileId + " / " + profile.ordinal + "\n"
+                + "Name: " + profile.name + "\n"
+                + "Sanitized fingerprint: " + profile.fingerprint + "\n"
+                + "Endpoint: " + profile.declared.optString("host", "unknown") + ":" + profile.declared.optInt("port", 0) + "\n"
+                + "Stages: passed=" + counts.optInt("passed") + ", partial=" + counts.optInt("partial") + ", failed=" + counts.optInt("failed") + ", skipped=" + counts.optInt("skipped") + "\n\n"
+                + "FILES\n-----\n"
+                + "connection.json    Connection, DNS/TCP/TLS/tunnel stages, attribution and bounded inferences.\n"
+                + "local-machine.json Android device/network passport and direct-network measurements.\n"
+                + "osi-map.md         Seven-layer evidence table and traffic path.\n"
+                + "README.txt         Run metadata, file guide, privacy and confidence notes.\n\n"
+                + "PRIVACY AND STORAGE\n-------------------\n"
+                + "The raw VLESS URI, UUID, REALITY public key and short ID are not written to this archive.\n"
+                + "Subscriber identifiers, phone number, IMSI, ICCID, precise cell identity and GPS location are not collected.\n"
+                + "The ZIP exists only in the app cache until Save, Share or Clear; it is not automatically copied to shared storage.\n"
+                + "Public/local addresses and requested network metadata remain potentially sensitive.\n\n"
+                + "CONFIDENCE AND LIMITS\n---------------------\n"
+                + "High means a direct protocol response or Android OS API observation; medium means compatible external signals; low means a weak hint.\n"
+                + "Probabilities are heuristic evidence weights, not calibrated statistical probabilities.\n"
+                + "Exact server routing, second hop, REALITY target and panel/HWID policy require server-side state.\n";
+    }
+
+    private static JSONObject statusCounts(JSONArray stages) {
+        JSONObject counts = JsonUtil.object("passed", 0, "partial", 0, "failed", 0, "skipped", 0);
+        for (int i = 0; i < stages.length(); i++) {
+            JSONObject stage = stages.optJSONObject(i); if (stage == null) continue; String status = stage.optString("status", "unknown");
+            JsonUtil.put(counts, status, counts.optInt(status) + 1);
+        }
+        return counts;
+    }
+
+    private static Map<String, List<String>> sharedBackends(List<TrafficLabRunner.ProfileResult> profiles) {
+        Map<String, List<String>> result = new HashMap<>();
+        for (TrafficLabRunner.ProfileResult profile : profiles) for (String ip : profile.endpointIps) result.computeIfAbsent(ip, ignored -> new java.util.ArrayList<>()).add(profile.profileId);
+        result.entrySet().removeIf(entry -> entry.getValue().size() < 2); return result;
+    }
+
+    private static String uniqueFolder(TrafficLabRunner.ProfileResult profile, Set<String> used) {
+        String safe = profile.name.replaceAll("[<>:\"/\\\\|?*\\x00-\\x1F]", "-").replaceAll("\\s+", " ").trim();
+        if (safe.trim().isEmpty()) safe = profile.profileId; if (safe.length() > 60) safe = safe.substring(0, 60).trim();
+        String root = String.format(Locale.ROOT, "%02d-%s", profile.ordinal, safe); String value = root; int suffix = 2;
+        while (!used.add(value)) value = root + "-" + suffix++; return value;
+    }
+
+    private static JSONArray commonLimitations() {
+        return new JSONArray().put("Client observations cannot prove server routing rules, a hidden second hop, panel HWID policy or the exact REALITY target.")
+                .put("IP geolocation and ASN organization names are attribution hints, not proof of physical server or LTE-tower location.")
+                .put("Android testing uses explicit app-local HTTP/SOCKS inbounds and does not represent a device-wide full-tunnel configuration.");
+    }
+
+    private static void write(ZipOutputStream output, String name, String content) throws Exception {
+        ZipEntry entry = new ZipEntry(name); entry.setTime(System.currentTimeMillis()); output.putNextEntry(entry);
+        output.write(content.getBytes(StandardCharsets.UTF_8)); output.closeEntry();
+    }
+
+    private static String formatDuration(long ms) {
+        long seconds = ms / 1000; return String.format(Locale.ROOT, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    }
+
+    private static String safeMarkdown(String value) { return value == null ? "unknown" : value.replace("|", "\\|").replace("\n", " "); }
+    private static String escapeMermaid(String value) { return value == null ? "unknown" : value.replace("\\", "\\\\").replace("\"", "'").replace("\n", " "); }
+
+    private static void deleteTree(File target) {
+        if (target == null || !target.exists()) return; File[] children = target.listFiles(); if (children != null) for (File child : children) deleteTree(child);
+        //noinspection ResultOfMethodCallIgnored
+        target.delete();
+    }
+
+    static final class PackageInput {
+        final String runId; final String startedAt; final String completedAt; final long durationMs; final String xrayVersion;
+        final JSONObject node; final JSONArray directExit; final JSONArray directAttribution; final List<TrafficLabRunner.ProfileResult> profiles;
+        PackageInput(String runId, String startedAt, String completedAt, long durationMs, String xrayVersion, JSONObject node,
+                     JSONArray directExit, JSONArray directAttribution, List<TrafficLabRunner.ProfileResult> profiles) {
+            this.runId = runId; this.startedAt = startedAt; this.completedAt = completedAt; this.durationMs = durationMs;
+            this.xrayVersion = xrayVersion; this.node = node; this.directExit = directExit; this.directAttribution = directAttribution; this.profiles = profiles;
+        }
+    }
+}

@@ -1,0 +1,11 @@
+# Loki Traffic Lab connection list
+#
+# Put exactly one complete VLESS URI on each active line. Blank lines and lines
+# beginning with #, ; or // are ignored. Connections are tested sequentially in
+# file order and appear as profile-01, profile-02, ... in the report.
+#
+# The URI fragment (#name) remains part of the URI and becomes the profile name.
+# Do not append comments to an active URI line.
+#
+# SECURITY: this file contains live credentials after you add connections.
+# Protect it like a password and delete it before sharing the portable folder.

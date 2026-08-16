@@ -1,0 +1,6 @@
+<resources>
+    <color name="tlab_primary">#3157D5</color>
+    <color name="tlab_primary_dark">#203B98</color>
+    <color name="tlab_accent">#00A58E</color>
+    <color name="tlab_surface">#F5F7FB</color>
+</resources>

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0",
+  "runGroupId": "replace-with-shared-run-group",
+  "nodeId": "ubuntu-node-01",
+  "networkLabel": "ubuntu-ethernet",
+  "scenario": "standalone",
+  "country": null,
+  "region": null,
+  "accessType": "auto",
+  "provider": null,
+  "restrictionState": "unknown",
+  "latitude": null,
+  "longitude": null,
+  "dnsAttempts": 3,
+  "tcpAttempts": 5,
+  "stabilityAttempts": 10,
+  "enableExtendedTests": true,
+  "enableNegativeControls": true,
+  "enableXudpCompatibility": true,
+  "canaryUrlTemplate": null,
+  "allowedHosts": [],
+  "maxProfiles": 25
+}

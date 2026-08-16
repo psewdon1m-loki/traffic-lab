@@ -1,0 +1,7 @@
+# Loki Traffic Lab Linux connection list
+#
+# Put one complete VLESS URI on each active line. Connections are tested in file
+# order. Blank lines and lines beginning with #, ; or // are ignored.
+#
+# SECURITY: this file contains live credentials after editing. Bootstrap copies
+# it to ~/.config/tlab/connections.txt with mode 0600. Never commit real links.

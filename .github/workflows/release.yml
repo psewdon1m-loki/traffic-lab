@@ -1,0 +1,238 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  X_RAY_VERSION: "25.10.15"
+
+jobs:
+  identity:
+    name: Validate release identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate semantic tag and project version
+        id: version
+        shell: pwsh
+        run: ./.github/scripts/Test-ReleaseVersion.ps1 -Tag '${{ github.ref_name }}'
+
+      - name: Validate entry-point syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n Linux/tlab Linux/bootstrap.sh Apk/gradlew
+
+  windows:
+    name: Build and smoke-test Windows
+    needs: identity
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.418
+          cache: true
+          cache-dependency-path: src/TrafficLab.ProfileRunner/packages.lock.json
+
+      - name: Build exact Windows candidate
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'windows-release'
+          & './Portable windows/build-portable.ps1' -RuntimeIdentifier win-x64 -XrayVersion $env:X_RAY_VERSION -OutputDirectory $out -Zip
+          & (Join-Path $out 'LokiTrafficLab-win-x64/LokiTrafficLab.exe') --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Published Windows self-test failed.' }
+          Copy-Item (Join-Path $out 'LokiTrafficLab-win-x64/manifest.json') (Join-Path $out 'windows-manifest.json') -Force
+
+      - name: Upload exact Windows candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-windows
+          path: |
+            ${{ runner.temp }}/windows-release/LokiTrafficLab-windows-x64-${{ needs.identity.outputs.version }}.zip
+            ${{ runner.temp }}/windows-release/LokiTrafficLab-windows-x64-${{ needs.identity.outputs.version }}.zip.sha256
+            ${{ runner.temp }}/windows-release/windows-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  linux:
+    name: Build and install-smoke Linux
+    needs: identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.418
+          cache: true
+          cache-dependency-path: src/TrafficLab.ProfileRunner/packages.lock.json
+
+      - name: Build exact Linux candidate
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'linux-release'
+          & './Linux/build-linux.ps1' -RuntimeIdentifier linux-x64 -XrayVersion $env:X_RAY_VERSION -OutputDirectory $out -Archive
+          Copy-Item (Join-Path $out 'LokiTrafficLab-linux-x64/manifest.json') (Join-Path $out 'linux-manifest.json') -Force
+
+      - name: Smoke-test exact binary and bootstrap archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/linux-release"
+          archive="$out/LokiTrafficLab-linux-x64-${{ needs.identity.outputs.version }}.tar.gz"
+          export LD_LIBRARY_PATH="$out/LokiTrafficLab-linux-x64"
+          "$out/LokiTrafficLab-linux-x64/LokiTrafficLab" --self-test
+          "$out/LokiTrafficLab-linux-x64/LokiTrafficLab" collector --self-test
+          docker run --rm -v "$out:/release:ro" ubuntu:24.04 bash -lc \
+            "bash /release/bootstrap.sh --archive /release/$(basename "$archive") && tlab self-test && tlab status"
+
+      - name: Upload exact Linux candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-linux
+          path: |
+            ${{ runner.temp }}/linux-release/LokiTrafficLab-linux-x64-${{ needs.identity.outputs.version }}.tar.gz
+            ${{ runner.temp }}/linux-release/LokiTrafficLab-linux-x64-${{ needs.identity.outputs.version }}.tar.gz.sha256
+            ${{ runner.temp }}/linux-release/bootstrap.sh
+            ${{ runner.temp }}/linux-release/bootstrap.sh.sha256
+            ${{ runner.temp }}/linux-release/linux-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  android:
+    name: Build and verify Android APK
+    needs: identity
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            Apk/gradle/wrapper/gradle-wrapper.properties
+            Apk/app/gradle.lockfile
+
+      - name: Build exact APK candidate
+        shell: pwsh
+        run: |
+          & './Apk/build-apk.ps1' -XrayVersion $env:X_RAY_VERSION -Version '${{ needs.identity.outputs.version }}' -VersionCode ${{ needs.identity.outputs.version_code }}
+          $apk = './Apk/releases/LokiTrafficLab-android-${{ needs.identity.outputs.version }}.apk'
+          & './Apk/.android-sdk/build-tools/35.0.0/apksigner.bat' verify --verbose --print-certs $apk
+          if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
+          $badging = (& './Apk/.android-sdk/build-tools/35.0.0/aapt.exe' dump badging $apk) -join "`n"
+          if ($badging -notmatch "versionName='${{ needs.identity.outputs.version }}'") { throw 'APK version does not match release tag.' }
+          Copy-Item './Apk/releases/manifest.json' './Apk/releases/android-manifest.json' -Force
+
+      - name: Upload exact Android candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-android
+          path: |
+            Apk/releases/LokiTrafficLab-android-${{ needs.identity.outputs.version }}.apk
+            Apk/releases/LokiTrafficLab-android-${{ needs.identity.outputs.version }}.apk.sha256
+            Apk/releases/android-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Attest and publish immutable release
+    needs: [identity, windows, linux, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download exact tested candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: staging
+
+      - name: Verify candidates and create release contract
+        shell: pwsh
+        run: |
+          ./.github/scripts/New-ReleaseManifest.ps1 `
+            -Version '${{ needs.identity.outputs.version }}' `
+            -Tag '${{ github.ref_name }}' `
+            -Repository '${{ github.repository }}' `
+            -InputRoot './staging' `
+            -OutputDirectory './release'
+
+      - name: Generate GitHub build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: release/*
+
+      - name: Publish files under the existing immutable tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $pointing = @(& git tag --points-at HEAD)
+          if ($pointing -notcontains $tag) { throw "Exact tag $tag does not point at checked-out HEAD." }
+          & gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists; refusing mutable asset replacement." }
+          $assets = @(Get-ChildItem './release' -File | Sort-Object Name | ForEach-Object FullName)
+          & gh release create $tag @assets --verify-tag --title "Loki Traffic Lab ${{ needs.identity.outputs.version }}" --notes-file './release/INSTALL-LINUX.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }
+
+      - name: Preserve complete release set as workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: traffic-lab-release-${{ needs.identity.outputs.version }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

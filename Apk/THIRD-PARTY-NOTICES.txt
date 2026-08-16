@@ -1,0 +1,16 @@
+LOKI TRAFFIC LAB FOR ANDROID - THIRD PARTY NOTICES
+==================================================
+
+Xray-core 25.10.15
+Source: https://github.com/XTLS/Xray-core
+License: Mozilla Public License 2.0
+Android release binaries are downloaded from the official XTLS GitHub release
+and verified against the release's SHA2-256 digest before APK packaging.
+
+Android SDK / Android Gradle Plugin
+Copyright Google LLC. Used only as build tooling under their respective terms;
+the Android SDK itself is not redistributed inside the application APK.
+
+Gradle 8.9
+Copyright Gradle, Inc. and contributors. Used only as local build tooling and
+not redistributed inside the application APK.

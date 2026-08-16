@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.LokiTrafficLab" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/tlab_surface</item>
+        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:colorAccent">@color/tlab_accent</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

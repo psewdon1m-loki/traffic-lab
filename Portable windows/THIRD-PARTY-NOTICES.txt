@@ -1,0 +1,34 @@
+Loki Traffic Lab - Third-Party Notices
+======================================
+
+This portable distribution contains third-party components. Their licenses
+apply to those components independently of the surrounding application.
+
+Xray-core
+---------
+Component: xray.exe
+Project: https://github.com/XTLS/Xray-core
+Source corresponding to the bundled core version can be obtained from the
+project release/tag history.
+License: Mozilla Public License 2.0
+License text: https://github.com/XTLS/Xray-core/blob/main/LICENSE
+
+Microsoft .NET, MsQuic and Microsoft.Data.Sqlite
+------------------------------------------------
+The self-contained executable includes Microsoft .NET runtime components and
+Microsoft.Data.Sqlite. The adjacent msquic.dll enables the native QUIC probe.
+Projects:
+  https://github.com/dotnet/runtime
+  https://github.com/microsoft/msquic
+  https://github.com/dotnet/efcore
+License: MIT
+License text: https://github.com/dotnet/efcore/blob/main/LICENSE.txt
+
+SQLite
+------
+Microsoft.Data.Sqlite's portable native bundle includes SQLite. See the SQLite
+project's copyright and public-domain dedication:
+  https://www.sqlite.org/copyright.html
+
+This notice is informational and is not a substitute for the license texts at
+the listed upstream projects.

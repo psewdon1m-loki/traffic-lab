@@ -1,1 +1,19 @@
 artifacts/
+/test-artifacts/
+src/**/bin/
+src/**/obj/
+connections.txt
+/Portable windows/releases/
+/Portable windows/vendor/
+/Linux/releases/
+/Linux/vendor/
+/Apk/.gradle/
+/Apk/.android-sdk/
+/Apk/local.properties
+/Apk/app/build/
+/Apk/app/src/main/jniLibs/
+/Apk/build/
+/Apk/vendor/
+/Apk/releases/
+*.jks
+*.keystore

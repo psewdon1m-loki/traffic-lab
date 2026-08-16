@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0",
+  "runGroupId": "replace-with-shared-run-group",
+  "nodeId": "ru-pc-01",
+  "networkLabel": "ru-home-ethernet",
+  "scenario": "standalone",
+  "country": "RU",
+  "region": "replace-me",
+  "accessType": "ethernet",
+  "provider": null,
+  "restrictionState": "unknown",
+  "latitude": null,
+  "longitude": null,
+  "dnsAttempts": 3,
+  "tcpAttempts": 5,
+  "stabilityAttempts": 10,
+  "enableExtendedTests": true,
+  "enableNegativeControls": false,
+  "enableXudpCompatibility": false,
+  "canaryUrlTemplate": null,
+  "allowedHosts": [],
+  "maxProfiles": 25
+}
