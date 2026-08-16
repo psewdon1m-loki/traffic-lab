@@ -25,7 +25,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.1.2.apk
+  Apk\releases\LokiTrafficLab-android-3.1.3.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 

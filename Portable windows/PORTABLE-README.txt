@@ -1,10 +1,10 @@
-Loki Traffic Lab Portable 3.1.2
+Loki Traffic Lab Portable 3.1.3
 ==============================
 
 This directory is self-contained. The target Windows PC does not need .NET,
 Xray, curl, dig, OpenSSL, Node.js, or any PowerShell module installed.
 
-Double-click LokiTrafficLab.exe (version 3.1.2 or newer) to open the Windows interface. It checks for an
+Double-click LokiTrafficLab.exe (version 3.1.3 or newer) to open the Windows interface. It checks for an
 already active system proxy/PAC, proxy environment variable, or VPN/TUN route before enabling a clean baseline, displays approximate
 progress and elapsed/remaining time, and offers to save the final ZIP.
 An otherwise unused xray/sing-box process left behind after disconnecting is

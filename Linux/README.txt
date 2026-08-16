@@ -1,4 +1,4 @@
-LOKI TRAFFIC LAB 3.1.2 - UBUNTU / LINUX
+LOKI TRAFFIC LAB 3.1.3 - UBUNTU / LINUX
 =======================================
 
 This directory contains the headless Linux adaptation of Traffic Lab. Ubuntu
@@ -10,11 +10,11 @@ INSTALL
 
 From a local checkout/release directory:
 
-  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.1.2.tar.gz
+  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.1.3.tar.gz
 
 For a hosted release, bootstrap also supports a one-line installation:
 
-  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.1.2.tar.gz
+  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.1.3.tar.gz
 
 The installer requires and verifies the archive SHA-256 sidecar, installs
 versioned files below /opt/tlab, creates /usr/local/bin/tlab, initializes a
@@ -123,7 +123,7 @@ BUILD
 
 From PowerShell at the repository root:
 
-  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.1.2' -Archive
+  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.1.3' -Archive
 
 Generated releases are placed in Linux/releases. Shared C# logic remains in
 traffic-lab/src; this folder contains only Linux packaging, runtime assets and

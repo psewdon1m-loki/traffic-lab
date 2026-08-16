@@ -169,7 +169,7 @@ internal static partial class Program
             Tool = new ToolInfo
             {
                 Name = "Loki Traffic Lab Profile Runner",
-                Version = "3.1.2",
+                Version = "3.1.3",
                 XrayPath = Path.GetFileName(options.XrayPath),
                 XrayVersion = await ReadXrayVersionAsync(options.XrayPath, cancellationToken),
                 TimeoutSeconds = options.TimeoutSeconds,
@@ -2059,7 +2059,7 @@ internal static partial class Program
                     Name = item.Name,
                     Description = item.Description,
                     InterfaceType = item.NetworkInterfaceType.ToString(),
-                    SpeedMbps = item.Speed > 0 ? Math.Round(item.Speed / 1_000_000d, 1) : null,
+                    SpeedMbps = NormalizeInterfaceSpeedMbps(item.Speed),
                     Ipv4Mtu = TryGetIpv4Mtu(properties),
                     Addresses = properties.UnicastAddresses.Select(address => address.Address.ToString()).ToArray(),
                     Gateways = properties.GatewayAddresses.Select(gateway => gateway.Address.ToString()).ToArray(),
@@ -2114,6 +2114,15 @@ internal static partial class Program
                 .Where(name => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)))
                 .ToArray()
         };
+    }
+
+    internal static double? NormalizeInterfaceSpeedMbps(long speedBitsPerSecond)
+    {
+        if (speedBitsPerSecond <= 0) return null;
+        var speedMbps = speedBitsPerSecond / 1_000_000d;
+        // Linux reports UINT_MAX Mbps when the driver cannot determine link speed.
+        if (speedMbps >= uint.MaxValue) return null;
+        return Math.Round(speedMbps, 1);
     }
 
     private static string CurrentPlatformName()
@@ -2709,6 +2718,31 @@ internal static partial class Program
         var dnsRound = new DnsProbeResult { Host = "example.com", Observations = { new DnsObservation("test", "A", "192.0.2.1", 60, 1, "success", null) } };
         Assert(ExtendedDiagnostics.BuildDnsConsistencyStage("test.dns", [dnsRound]).Status == "passed", "DNS consistency stage construction failed.");
         Assert(ExtendedDiagnostics.BuildGeoConsensusStage("test.geo", "endpoint", []).Status == "skipped", "Geo-consensus empty-evidence handling failed.");
+        var linuxRoutes = ExtendedDiagnostics.ParseDefaultRoutes(
+            "unicast default via 216.73.158.126 dev enp3s0 proto static metric 100\n" +
+            "unicast 216.73.158.0/24 dev enp3s0 proto kernel scope link\n" +
+            "unicast default via fe80::1 dev enp3s0 proto ra metric 100",
+            windows: false);
+        Assert(linuxRoutes.Count == 2 && linuxRoutes.All(route => route.Contains("default", StringComparison.OrdinalIgnoreCase)),
+            "Linux detailed default-route parsing failed.");
+        Assert(NormalizeInterfaceSpeedMbps((long)uint.MaxValue * 1_000_000L) is null,
+            "Unknown Linux interface-speed sentinel was not normalized to null.");
+        Assert(NormalizeInterfaceSpeedMbps(10_000_000_000L) == 10_000,
+            "Known interface speed normalization failed.");
+        Assert(ExtendedDiagnostics.IsRawSocketPermissionError("Run program under privileged user account or grant cap_net_raw capability using setcap(8)."),
+            "Linux raw-socket privilege failure was not recognized.");
+        Assert(!ExtendedDiagnostics.IsRawSocketPermissionError("Request timed out."),
+            "An ICMP timeout was incorrectly classified as a privilege failure.");
+        var sanCertificate = new CertificateInfo
+        {
+            Subject = "CN=example",
+            Issuer = "CN=example",
+            ThumbprintSha256 = "self-test",
+            SubjectAlternativeNames = ["DNS:*.yandex.com", "DNS Name=example.org"]
+        };
+        Assert(sanCertificate.CoversHost("market.yandex.com"), "Linux DNS: wildcard SAN matching failed.");
+        Assert(sanCertificate.CoversHost("example.org"), "Windows DNS Name= SAN matching failed.");
+        Assert(!sanCertificate.CoversHost("deep.market.yandex.com"), "Wildcard SAN incorrectly matched multiple labels.");
         var context = new PortableTestPlan { NodeId = "node-a", NetworkLabel = "ru-ethernet", Country = "RU" }.ToContext();
         Assert(context.NodeId == "node-a" && context.Country == "RU", "Portable test-plan context mapping failed.");
         var fileInput = ConnectionFileLoader.ParseLines(["# comment", "", sample, "; disabled", anotherCredential.Name.Replace("Sample", sample, StringComparison.Ordinal)]);
@@ -2750,7 +2784,7 @@ internal static partial class Program
             ExtendedTest = new ExtendedTestMetadata { Enabled = true, Elevated = false, SoakDurationSeconds = 300, ParallelFlows = 20, NetworkLossSeconds = 5 },
             NetworkLabel = "self-test",
             TestContext = new TestContext { NodeId = "self-test-pc" },
-            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.1.2", XrayPath = "xray.exe", XrayVersion = "self-test" },
+            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.1.3", XrayPath = "xray.exe", XrayVersion = "self-test" },
             Input = new InputSummary { LoadedConnections = 1, ScheduledConnections = 1 },
             Environment = new NetworkEnvironment()
         };
@@ -3482,7 +3516,11 @@ internal sealed class CertificateInfo
     {
         foreach (var raw in SubjectAlternativeNames)
         {
-            var value = Regex.Replace(raw, "^DNS Name=", "", RegexOptions.IgnoreCase).Trim();
+            var value = Regex.Replace(
+                raw,
+                @"^DNS(?:\s+Name)?\s*[:=]\s*",
+                "",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
             var ascii = value.Contains('(') && value.EndsWith(')')
                 ? value[(value.LastIndexOf('(') + 1)..^1]
                 : value;

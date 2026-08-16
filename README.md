@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.1.2.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.1.3.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -220,7 +220,7 @@ closed-pipe/EOF teardown is classified as benign. Only unexpected core markers
 downgrade `tunnel.logs`. Download measurements now expose separate
 RTT/TTFB-inclusive effective throughput and approximate post-first-byte payload
 throughput across a cold request and repeated warm attempts.
-Linux release 3.1.2 adds the dedicated `tlab extended` command, the same
+Linux release 3.1.3 includes the dedicated `tlab extended` command, the same
 separate `extended-test.json` package layout, explicit NORMAL/EXTENDED metadata,
 and platform/distribution/kernel/architecture fields. Its controlled
 interruption uses SIGSTOP/SIGCONT only on Traffic Lab's own Xray child and never

@@ -41,12 +41,7 @@ internal static class ExtendedDiagnostics
             {
                 output = await RunProcessAsync("route.exe", "print", timeout);
                 normalized = output.Stdout.Replace("\r", "", StringComparison.Ordinal);
-                defaults = normalized.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                    .Select(line => Regex.Replace(line.Trim(), @"\s+", " "))
-                    .Where(line => line.StartsWith("0.0.0.0 0.0.0.0 ", StringComparison.Ordinal)
-                        || line.StartsWith("::/0 ", StringComparison.OrdinalIgnoreCase))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
+                defaults = ParseDefaultRoutes(normalized, windows: true);
             }
             else
             {
@@ -54,11 +49,7 @@ internal static class ExtendedDiagnostics
                 var ipv6 = await RunProcessAsync("ip", "-6 -details route show table all", timeout);
                 output = new SimpleProcessResult(ipv4.ExitCode, ipv4.Stdout + "\n" + ipv6.Stdout, ipv4.Stderr + "\n" + ipv6.Stderr);
                 normalized = output.Stdout.Replace("\r", "", StringComparison.Ordinal);
-                defaults = normalized.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                    .Select(line => Regex.Replace(line.Trim(), @"\s+", " "))
-                    .Where(line => line.StartsWith("default ", StringComparison.OrdinalIgnoreCase))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
+                defaults = ParseDefaultRoutes(normalized, windows: false);
             }
             return new RouteSnapshot
             {
@@ -78,6 +69,22 @@ internal static class ExtendedDiagnostics
                 Error = ProgramAccess.Redact(ex.Message)
             };
         }
+    }
+
+    internal static IReadOnlyList<string> ParseDefaultRoutes(string output, bool windows)
+    {
+        return output.Replace("\r", "", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => Regex.Replace(line.Trim(), @"\s+", " "))
+            .Where(line => windows
+                ? line.StartsWith("0.0.0.0 0.0.0.0 ", StringComparison.Ordinal)
+                    || line.StartsWith("::/0 ", StringComparison.OrdinalIgnoreCase)
+                : Regex.IsMatch(
+                    line,
+                    @"^(?:(?:unicast|local|broadcast|multicast|throw|unreachable|prohibit|blackhole|nat)\s+)?default(?:\s|$)",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     public static StageResult BuildCaptureScopeStage(RouteSnapshot before, RouteSnapshot after, NetworkEnvironment environment)
@@ -255,6 +262,7 @@ internal static class ExtendedDiagnostics
         var watch = Stopwatch.StartNew();
         int? largestSuccessfulPayload = null;
         var consecutiveTimeouts = 0;
+        var rawSocketPermissionUnavailable = false;
         using var ping = new Ping();
         foreach (var size in sizes)
         {
@@ -271,24 +279,58 @@ internal static class ExtendedDiagnostics
             }
             catch (Exception ex)
             {
-                observations.Add(new { payloadBytes = size, success = false, status = "error", error = ProgramAccess.Redact(ex.Message) });
+                var error = ProgramAccess.Redact(ex.Message);
+                rawSocketPermissionUnavailable = IsRawSocketPermissionError(error);
+                observations.Add(new
+                {
+                    payloadBytes = size,
+                    success = false,
+                    status = rawSocketPermissionUnavailable ? "unavailable-insufficient-privileges" : "error",
+                    error
+                });
+                if (rawSocketPermissionUnavailable) break;
             }
         }
         watch.Stop();
+        var status = largestSuccessfulPayload.HasValue
+            ? "passed"
+            : rawSocketPermissionUnavailable
+                ? "skipped"
+                : "partial";
+        var errorSummary = largestSuccessfulPayload.HasValue
+            ? null
+            : rawSocketPermissionUnavailable
+                ? OperatingSystem.IsLinux()
+                    ? "Path MTU probe was not executed because raw-socket permission is unavailable. Run as root or grant cap_net_raw to the Traffic Lab executable."
+                    : "Path MTU probe was not executed because raw-socket permission is unavailable. Run Traffic Lab elevated."
+                : "No ICMP DF size succeeded; ICMP may be filtered or the path may reject these payload sizes.";
         return StageResult.FromStatus(
             "endpoint.pathMtu",
-            largestSuccessfulPayload.HasValue ? "passed" : "partial",
+            status,
             watch.ElapsedMilliseconds,
             new
             {
                 ip = address.ToString(),
                 dontFragment = true,
+                probeAvailability = rawSocketPermissionUnavailable ? "insufficient-raw-socket-permission" : "available",
+                requiresRawSocketPrivilege = rawSocketPermissionUnavailable,
                 largestSuccessfulIcmpPayloadBytes = largestSuccessfulPayload,
                 estimatedIpMtu = largestSuccessfulPayload.HasValue ? (int?)(largestSuccessfulPayload.Value + 28) : null,
                 observations,
-                interpretation = "ICMP can be filtered. A missing reply is not proof of an MTU failure, so tunnel payload tests remain authoritative for application traffic."
+                interpretation = rawSocketPermissionUnavailable
+                    ? "No ICMP DF packet was sent. This is a local privilege limitation, not evidence of ICMP filtering or an MTU failure."
+                    : "ICMP can be filtered. A missing reply is not proof of an MTU failure, so tunnel payload tests remain authoritative for application traffic."
             },
-            largestSuccessfulPayload.HasValue ? null : "No ICMP DF size succeeded; ICMP may be filtered.");
+            errorSummary);
+    }
+
+    internal static bool IsRawSocketPermissionError(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        return Regex.IsMatch(
+            message,
+            @"privileged user account|cap_net_raw|operation not permitted|permission denied|access (?:is )?denied",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     public static StageResult BuildGeoConsensusStage(string stage, string subject, IEnumerable<IpAttribution> attributions)
