@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.2.0.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.2.2.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -231,6 +231,15 @@ cold/warm observations, parallel TCP/UDP, DNS failure/recovery, a five-minute
 application soak, forced reconnect and a five-second interruption scoped only
 to the APK's isolated Xray child. Android radios, routes and other applications
 are not changed.
+Android release 3.2.1 classifies readiness EOF, completed UDP teardown and
+app-side loopback broken-pipe/reset cleanup as expected rather than degrading
+an otherwise successful run. Its bounded speed probe now uses one calibration
+plus three adaptive measurement samples, median and variability/confidence reporting, and separates payload
+rate from connection/TLS/TTFB-inclusive effective rate.
+Android release 3.2.2 shows a persistent `Result export` card in the main screen
+only after the ZIP is ready. Save/Share can be used repeatedly; the card and
+temporary archive remain available until a new test starts or connections are
+cleared.
 `STOP TEST` cancels rather than pauses: it
 terminates the current Xray process tree, removes incomplete outputs and makes
 the next START begin a new run from the first connection. Progress is deliberately labelled approximate because

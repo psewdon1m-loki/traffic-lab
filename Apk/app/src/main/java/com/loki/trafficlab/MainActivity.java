@@ -54,6 +54,8 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     private Button extended;
     private Button paste;
     private Button clear;
+    private LinearLayout resultExportCard;
+    private TextView resultExportSummary;
     private Button save;
     private Button share;
     private TrafficLabService service;
@@ -124,12 +126,15 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         LinearLayout testButtons = row(); testButtons.addView(start, params(0, dp(52), 1, 0, 6, 0));
         testButtons.addView(extended, params(0, dp(52), 1, 6, 0, 0)); progressCard.addView(testButtons, params(-1, -2, 0, 14, 0, 0));
 
-        LinearLayout exportCard = card(); root.addView(exportCard, params(-1, -2, 0, 0, 0, 0));
-        TextView resultTitle = text("Result export", 18, Color.rgb(25, 35, 61)); resultTitle.setTypeface(Typeface.DEFAULT_BOLD); exportCard.addView(resultTitle);
-        TextView resultHelp = text("The ZIP stays in temporary app cache. Choose where to save it, or send it with the Android Sharesheet.", 13, Color.DKGRAY);
-        resultHelp.setPadding(0, dp(4), 0, dp(10)); exportCard.addView(resultHelp);
-        save = button("Save ZIP", false); share = button("Share ZIP", true); save.setEnabled(false); share.setEnabled(false);
-        LinearLayout exportButtons = row(); exportButtons.addView(save, params(0, dp(48), 1, 0, 6, 0)); exportButtons.addView(share, params(0, dp(48), 1, 6, 0, 0)); exportCard.addView(exportButtons);
+        resultExportCard = card(); resultExportCard.setVisibility(View.GONE);
+        root.addView(resultExportCard, params(-1, -2, 0, 0, 0, 0));
+        TextView resultTitle = text("Result export", 18, Color.rgb(25, 35, 61));
+        resultTitle.setTypeface(Typeface.DEFAULT_BOLD); resultExportCard.addView(resultTitle);
+        resultExportSummary = text("", 13, Color.DKGRAY); resultExportSummary.setPadding(0, dp(4), 0, dp(10));
+        resultExportCard.addView(resultExportSummary);
+        save = button("Save ZIP", false); share = button("Share ZIP", true);
+        LinearLayout exportButtons = row(); exportButtons.addView(save, params(0, dp(48), 1, 0, 6, 0));
+        exportButtons.addView(share, params(0, dp(48), 1, 6, 0, 0)); resultExportCard.addView(exportButtons);
 
         paste.setOnClickListener(view -> pasteClipboard()); clear.setOnClickListener(view -> clearEverything());
         start.setOnClickListener(view -> startOrStop(TrafficLabRunner.TestType.NORMAL));
@@ -184,7 +189,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
                     }).show();
             return;
         }
-        pendingStart = links; pendingTestType = testType;
+        pendingStart = links; pendingTestType = testType; latestZip = null; hideResultExport();
         List<String> missing = missingPermissions();
         if (!missing.isEmpty()) requestPermissions(missing.toArray(new String[0]), REQUEST_PERMISSIONS); else beginPendingTest();
     }
@@ -242,9 +247,27 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         startActivity(Intent.createChooser(send, "Share Traffic Lab result"));
     }
 
+    private void showResultExport(TrafficLabService.State state) {
+        if (state == null || !state.completed() || latestZip == null || !latestZip.isFile()) { hideResultExport(); return; }
+        String mode = state.testType.value.toUpperCase(Locale.ROOT);
+        resultExportSummary.setText(mode + " test completed successfully.\n"
+                + "Connections tested: " + state.completed + "\n"
+                + "Duration: " + duration(state.durationMs) + "\n"
+                + "Archive: " + latestZip.getName() + "\n\n"
+                + "This block remains available until a new test starts or connections are cleared. "
+                + "The ZIP stays in temporary app cache until you save or share it.");
+        save.setEnabled(true); share.setEnabled(true); resultExportCard.setVisibility(View.VISIBLE);
+    }
+
+    private void hideResultExport() {
+        if (resultExportCard == null) return;
+        resultExportCard.setVisibility(View.GONE); save.setEnabled(false); share.setEnabled(false);
+        resultExportSummary.setText("");
+    }
+
     private void clearEverything() {
         if (latestState != null && latestState.running()) { toast("Stop the active test before clearing connections"); return; }
-        connections.setText(""); latestZip = null; save.setEnabled(false); share.setEnabled(false);
+        connections.setText(""); latestZip = null; hideResultExport();
         if (service != null) service.clearConnectionsAndResult();
         status.setText("Connection list and temporary result cleared"); progress.setProgress(0);
     }
@@ -254,10 +277,12 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     }
 
     private void render(TrafficLabService.State state) {
-        latestState = state; progress.setProgress(state.percent); status.setText(state.message + (state.total > 0 ? " · " + state.completed + "/" + state.total : ""));
+        latestState = state; progress.setProgress(state.percent);
         boolean running = state.running(); connections.setEnabled(!running); paste.setEnabled(!running); clear.setEnabled(!running); extended.setEnabled(!running);
         start.setText(running ? "Stop test" : "Start test"); latestZip = state.zip;
-        save.setEnabled(state.completed() && latestZip != null && latestZip.isFile()); share.setEnabled(save.isEnabled());
+        boolean resultReady = state.completed() && latestZip != null && latestZip.isFile();
+        status.setText(state.message + (state.total > 0 ? " · " + state.completed + "/" + state.total : ""));
+        if (resultReady) showResultExport(state); else hideResultExport();
         updateTime();
     }
 

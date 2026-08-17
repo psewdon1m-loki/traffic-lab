@@ -37,6 +37,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -53,6 +54,11 @@ final class ProbeSuite {
     static final int TIMEOUT_MS = 6_000;
     private static final Pattern IP_PATTERN = Pattern.compile("(?<![0-9A-Fa-f:.])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?![0-9])|(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])");
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int PERFORMANCE_ATTEMPTS = 4;
+    private static final int DOWNLOAD_CALIBRATION_BYTES = 256 * 1024;
+    private static final int DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024;
+    private static final int UPLOAD_CALIBRATION_BYTES = 128 * 1024;
+    private static final int UPLOAD_MAX_BYTES = 512 * 1024;
 
     private ProbeSuite() {}
 
@@ -313,25 +319,179 @@ final class ProbeSuite {
     }
 
     static JSONObject directPerformance(Proxy proxy) {
-        JSONObject data = new JSONObject();
-        try {
-            long started = System.nanoTime();
-            HttpResult download = http("https://speed.cloudflare.com/__down?bytes=2097152", proxy, "GET", null, 2 * 1024 * 1024, 20_000);
-            long elapsed = Math.max(1, elapsed(started));
-            JsonUtil.put(data, "downloadBytes", download.bytesRead);
-            JsonUtil.put(data, "downloadElapsedMs", elapsed);
-            JsonUtil.put(data, "downloadMbps", Math.round(download.bytesRead * 8.0 / elapsed / 1000.0 * 100.0) / 100.0);
-        } catch (Exception error) { JsonUtil.put(data, "downloadError", error.getClass().getSimpleName()); }
-        try {
-            byte[] upload = new byte[512 * 1024];
-            long started = System.nanoTime();
-            HttpResult response = http("https://speed.cloudflare.com/__up", proxy, "POST", upload, 64 * 1024, 20_000);
-            long elapsed = Math.max(1, elapsed(started));
-            JsonUtil.put(data, "uploadBytes", upload.length); JsonUtil.put(data, "uploadStatus", response.statusCode);
-            JsonUtil.put(data, "uploadElapsedMs", elapsed);
-            JsonUtil.put(data, "uploadMbps", Math.round(upload.length * 8.0 / elapsed / 1000.0 * 100.0) / 100.0);
-        } catch (Exception error) { JsonUtil.put(data, "uploadError", error.getClass().getSimpleName()); }
+        JSONObject data = new JSONObject(); long started = System.nanoTime();
+        JSONObject download = measureDownload(proxy);
+        JSONObject upload = measureUpload(proxy);
+        JsonUtil.put(data, "measurementVersion", 2);
+        JsonUtil.put(data, "method", "adaptive four-sample Cloudflare probe; the bounded calibration sample is excluded from the recommended median and three measurement samples permit keep-alive reuse");
+        JsonUtil.put(data, "interpretation", "Recommended Mbps is the median post-first-byte payload rate. Effective Mbps includes connect, TLS, TTFB and server response overhead. Both are reported so short-request setup cost is not mislabeled as sustained bandwidth.");
+        JsonUtil.put(data, "resourceBounds", JsonUtil.object("attemptsPerDirection", PERFORMANCE_ATTEMPTS,
+                "maximumDownloadBytesPerAttempt", DOWNLOAD_MAX_BYTES, "downloadPayloadRetainedInMemory", false,
+                "maximumUploadBytesPerAttempt", UPLOAD_MAX_BYTES, "sequentialAttempts", true));
+        JsonUtil.put(data, "download", download); JsonUtil.put(data, "upload", upload);
+        JsonUtil.put(data, "downloadStatus", download.optString("status", "failed"));
+        JsonUtil.put(data, "uploadStatus", upload.optString("status", "failed"));
+        if (download.optInt("successfulAttempts") > 0) {
+            JsonUtil.put(data, "downloadBytes", download.optLong("successfulBytes"));
+            JsonUtil.put(data, "downloadElapsedMs", download.optLong("measurementElapsedMs"));
+            JsonUtil.put(data, "downloadMbps", download.optDouble("recommendedMbps"));
+            JsonUtil.put(data, "downloadEffectiveMbps", download.optDouble("medianEffectiveMbps"));
+            JsonUtil.put(data, "downloadTtfbMedianMs", download.optLong("medianTtfbMs"));
+        } else JsonUtil.put(data, "downloadError", download.optString("summaryError", "all attempts failed"));
+        if (upload.optInt("successfulAttempts") > 0) {
+            JsonUtil.put(data, "uploadBytes", upload.optLong("successfulBytes"));
+            JsonUtil.put(data, "uploadElapsedMs", upload.optLong("measurementElapsedMs"));
+            JsonUtil.put(data, "uploadMbps", upload.optDouble("recommendedMbps"));
+            JsonUtil.put(data, "uploadEffectiveMbps", upload.optDouble("medianEffectiveMbps"));
+            JsonUtil.put(data, "uploadResponseMedianMs", upload.optLong("medianTotalMs"));
+        } else JsonUtil.put(data, "uploadError", upload.optString("summaryError", "all attempts failed"));
+        JsonUtil.put(data, "measurementElapsedMs", elapsed(started));
         return data;
+    }
+
+    static JSONObject performanceStage(String stageName, JSONObject performance, String direction) {
+        JSONObject measurement = performance.optJSONObject(direction);
+        String status = measurement == null ? "failed" : measurement.optString("status", "failed");
+        long elapsedMs = measurement == null ? 0 : measurement.optLong("measurementElapsedMs");
+        if ("passed".equals(status)) return JsonUtil.passed(stageName, elapsedMs, performance);
+        String reason = measurement == null ? "Performance measurement was not created."
+                : measurement.optString("summaryError", "Fewer than two adaptive throughput attempts succeeded.");
+        return "partial".equals(status) ? JsonUtil.partial(stageName, elapsedMs, reason, performance)
+                : JsonUtil.failed(stageName, elapsedMs, reason, performance);
+    }
+
+    private static JSONObject measureDownload(Proxy proxy) {
+        long started = System.nanoTime(); JSONArray samples = new JSONArray(); int requestedBytes = DOWNLOAD_CALIBRATION_BYTES;
+        for (int attempt = 1; attempt <= PERFORMANCE_ATTEMPTS; attempt++) {
+            JSONObject sample = new JSONObject(); JsonUtil.put(sample, "attempt", attempt);
+            JsonUtil.put(sample, "sampleRole", attempt == 1 ? "calibration" : "measurement");
+            JsonUtil.put(sample, "connectionModeRequested", attempt == 1 ? "cold/close" : "warm/keep-alive");
+            JsonUtil.put(sample, "requestedBytes", requestedBytes);
+            try {
+                String url = "https://speed.cloudflare.com/__down?bytes=" + requestedBytes + "&tlab=" + UUID.randomUUID();
+                HttpResult response = http(url, proxy, "GET", null, requestedBytes, 18_000, attempt == 1, 0);
+                boolean success = response.statusCode >= 200 && response.statusCode < 300 && response.bytesRead >= requestedBytes;
+                JsonUtil.put(sample, "success", success); JsonUtil.put(sample, "statusCode", response.statusCode);
+                JsonUtil.put(sample, "bytes", response.bytesRead); JsonUtil.put(sample, "totalMs", response.totalElapsedMs);
+                JsonUtil.put(sample, "ttfbMs", response.firstByteElapsedMs);
+                JsonUtil.put(sample, "payloadTransferMs", response.responseTransferElapsedMs);
+                JsonUtil.put(sample, "effectiveMbps", mbps(response.bytesRead, response.totalElapsedMs));
+                JsonUtil.put(sample, "payloadMbps", mbps(response.bytesRead, response.responseTransferElapsedMs));
+                if (!success) JsonUtil.put(sample, "error", "Short or non-success download response");
+                if (attempt == 1 && success) requestedBytes = adaptiveBytes(sample.optDouble("payloadMbps"), 2_000,
+                        DOWNLOAD_CALIBRATION_BYTES, DOWNLOAD_MAX_BYTES);
+            } catch (Exception error) {
+                JsonUtil.put(sample, "success", false);
+                JsonUtil.put(sample, "error", JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage()));
+                if (attempt == 1) requestedBytes = 1024 * 1024;
+            }
+            samples.put(sample);
+        }
+        return summarizePerformance("download", samples, elapsed(started));
+    }
+
+    private static JSONObject measureUpload(Proxy proxy) {
+        long started = System.nanoTime(); JSONArray samples = new JSONArray(); int requestedBytes = UPLOAD_CALIBRATION_BYTES;
+        for (int attempt = 1; attempt <= PERFORMANCE_ATTEMPTS; attempt++) {
+            JSONObject sample = new JSONObject(); JsonUtil.put(sample, "attempt", attempt);
+            JsonUtil.put(sample, "sampleRole", attempt == 1 ? "calibration" : "measurement");
+            JsonUtil.put(sample, "connectionModeRequested", attempt == 1 ? "cold/close" : "warm/keep-alive");
+            JsonUtil.put(sample, "requestedBytes", requestedBytes);
+            try {
+                byte[] upload = new byte[requestedBytes];
+                HttpResult response = http("https://speed.cloudflare.com/__up?tlab=" + UUID.randomUUID(), proxy,
+                        "POST", upload, 64 * 1024, 18_000, attempt == 1);
+                boolean success = response.statusCode >= 200 && response.statusCode < 300;
+                JsonUtil.put(sample, "success", success); JsonUtil.put(sample, "statusCode", response.statusCode);
+                JsonUtil.put(sample, "bytes", requestedBytes); JsonUtil.put(sample, "totalMs", response.totalElapsedMs);
+                JsonUtil.put(sample, "requestBodyWriteMs", response.requestBodyElapsedMs);
+                JsonUtil.put(sample, "requestAcknowledgedMs", response.requestAcknowledgedElapsedMs);
+                JsonUtil.put(sample, "responseHeadersMs", response.responseHeadersElapsedMs);
+                JsonUtil.put(sample, "effectiveMbps", mbps(requestedBytes, response.totalElapsedMs));
+                JsonUtil.put(sample, "payloadMbps", mbps(requestedBytes, response.requestAcknowledgedElapsedMs));
+                if (!success) JsonUtil.put(sample, "error", "Non-success upload response");
+                if (attempt == 1 && success) requestedBytes = adaptiveBytes(sample.optDouble("effectiveMbps"), 2_000,
+                        64 * 1024, UPLOAD_MAX_BYTES);
+            } catch (Exception error) {
+                JsonUtil.put(sample, "success", false);
+                JsonUtil.put(sample, "error", JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage()));
+                if (attempt == 1) requestedBytes = 128 * 1024;
+            }
+            samples.put(sample);
+        }
+        return summarizePerformance("upload", samples, elapsed(started));
+    }
+
+    static JSONObject summarizePerformance(String direction, JSONArray samples, long measurementElapsedMs) {
+        List<Double> effective = new ArrayList<>(); List<Double> payload = new ArrayList<>(); List<Long> ttfb = new ArrayList<>();
+        List<Long> totals = new ArrayList<>(); List<Double> selectedEffective = new ArrayList<>();
+        List<Double> selectedPayload = new ArrayList<>(); List<Long> selectedTtfb = new ArrayList<>();
+        List<Long> selectedTotals = new ArrayList<>(); long successfulBytes = 0; String lastError = null;
+        for (int index = 0; index < samples.length(); index++) {
+            JSONObject sample = samples.optJSONObject(index); if (sample == null) continue;
+            if (sample.optBoolean("success")) {
+                effective.add(sample.optDouble("effectiveMbps")); payload.add(sample.optDouble("payloadMbps"));
+                successfulBytes += sample.optLong("bytes"); totals.add(sample.optLong("totalMs"));
+                if (sample.has("ttfbMs")) ttfb.add(sample.optLong("ttfbMs"));
+                if (sample.optInt("attempt") > 1 || "measurement".equals(sample.optString("sampleRole"))) {
+                    selectedEffective.add(sample.optDouble("effectiveMbps")); selectedPayload.add(sample.optDouble("payloadMbps"));
+                    selectedTotals.add(sample.optLong("totalMs"));
+                    if (sample.has("ttfbMs")) selectedTtfb.add(sample.optLong("ttfbMs"));
+                }
+            } else if (sample.has("error")) lastError = sample.optString("error");
+        }
+        boolean calibrationFallback = selectedPayload.isEmpty();
+        if (calibrationFallback) {
+            selectedEffective.addAll(effective); selectedPayload.addAll(payload); selectedTtfb.addAll(ttfb); selectedTotals.addAll(totals);
+        }
+        int successes = effective.size(); String status = successes == PERFORMANCE_ATTEMPTS ? "passed" : successes > 0 ? "partial" : "failed";
+        JSONObject result = JsonUtil.object("direction", direction, "status", status, "requestedAttempts", samples.length(),
+                "successfulAttempts", successes, "failedAttempts", samples.length() - successes,
+                "measurementSuccessfulAttempts", calibrationFallback ? 0 : selectedPayload.size(),
+                "calibrationIncludedInRecommended", calibrationFallback,
+                "successfulBytes", successfulBytes, "measurementElapsedMs", measurementElapsedMs, "samples", samples,
+                "selection", calibrationFallback ? "calibration fallback because no measurement sample succeeded"
+                        : "median across successful non-calibration adaptive measurement samples", "boundedMemory", true);
+        if (successes > 0) {
+            Collections.sort(selectedEffective); Collections.sort(selectedPayload); Collections.sort(selectedTtfb); Collections.sort(selectedTotals);
+            double medianEffective = median(selectedEffective); double medianPayload = median(selectedPayload);
+            JsonUtil.put(result, "medianEffectiveMbps", round2(medianEffective));
+            JsonUtil.put(result, "medianPayloadMbps", round2(medianPayload));
+            JsonUtil.put(result, "recommendedMbps", round2(medianPayload));
+            JsonUtil.put(result, "minPayloadMbps", round2(selectedPayload.get(0)));
+            JsonUtil.put(result, "maxPayloadMbps", round2(selectedPayload.get(selectedPayload.size() - 1)));
+            JsonUtil.put(result, "payloadCoefficientOfVariation", round2(coefficientOfVariation(selectedPayload)));
+            JsonUtil.put(result, "medianTotalMs", medianLong(selectedTotals));
+            if (!selectedTtfb.isEmpty()) JsonUtil.put(result, "medianTtfbMs", medianLong(selectedTtfb));
+            double variation = coefficientOfVariation(selectedPayload);
+            if (variation > 0.50) { status = "partial"; JsonUtil.put(result, "status", status); }
+            JsonUtil.put(result, "confidence", selectedPayload.size() >= 3 && successes == PERFORMANCE_ATTEMPTS && variation <= 0.25 ? "high"
+                    : selectedPayload.size() >= 2 ? "medium" : "low");
+            if (variation > 0.50) JsonUtil.put(result, "summaryError", "Successful samples varied by more than 50%; treat the median as low-confidence.");
+        }
+        if (successes < PERFORMANCE_ATTEMPTS && !result.has("summaryError")) JsonUtil.put(result, "summaryError", lastError == null
+                ? "Only " + successes + " of " + PERFORMANCE_ATTEMPTS + " adaptive throughput attempts succeeded." : lastError);
+        return result;
+    }
+
+    static int adaptiveBytes(double mbps, int targetDurationMs, int minimum, int maximum) {
+        if (!Double.isFinite(mbps) || mbps <= 0) return minimum;
+        long estimate = Math.round(mbps * 125.0 * targetDurationMs);
+        return (int) Math.max(minimum, Math.min(maximum, estimate));
+    }
+
+    private static double mbps(long bytes, long elapsedMs) { return round2(bytes * 8.0 / Math.max(1, elapsedMs) / 1000.0); }
+    private static double round2(double value) { return Math.round(value * 100.0) / 100.0; }
+    private static double median(List<Double> sorted) {
+        int middle = sorted.size() / 2; return sorted.size() % 2 == 1 ? sorted.get(middle) : (sorted.get(middle - 1) + sorted.get(middle)) / 2.0;
+    }
+    private static long medianLong(List<Long> sorted) {
+        int middle = sorted.size() / 2; return sorted.size() % 2 == 1 ? sorted.get(middle) : Math.round((sorted.get(middle - 1) + sorted.get(middle)) / 2.0);
+    }
+    private static double coefficientOfVariation(List<Double> values) {
+        if (values.size() < 2) return 0; double mean = 0; for (double value : values) mean += value; mean /= values.size();
+        if (mean == 0) return 0; double variance = 0; for (double value : values) variance += (value - mean) * (value - mean);
+        return Math.sqrt(variance / values.size()) / mean;
     }
 
     static JSONObject httpStage(Proxy proxy) {
@@ -532,33 +692,56 @@ final class ProbeSuite {
     }
 
     static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout, boolean forceClose) throws Exception {
+        return http(url, proxy, method, body, maxResponse, timeout, forceClose, maxResponse);
+    }
+
+    static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout,
+                           boolean forceClose, int maxCaptureBytes) throws Exception {
+        long started = System.nanoTime(); long requestBodyElapsedMs = 0; long requestAcknowledgedElapsedMs = 0;
+        long requestBodyStarted = 0;
         HttpURLConnection connection = (HttpURLConnection) (proxy == null ? new URL(url).openConnection() : new URL(url).openConnection(proxy));
         connection.setConnectTimeout(timeout); connection.setReadTimeout(timeout); connection.setInstanceFollowRedirects(true);
+        connection.setUseCaches(false);
         connection.setRequestProperty("User-Agent", "LokiTrafficLabAndroid/1.0");
         connection.setRequestProperty("Accept", "application/json,text/plain,*/*");
+        connection.setRequestProperty("Accept-Encoding", "identity");
         connection.setRequestProperty("Connection", forceClose ? "close" : "keep-alive");
         connection.setRequestMethod(method);
         if (body != null) {
             connection.setDoOutput(true); connection.setFixedLengthStreamingMode(body.length);
             connection.setRequestProperty("Content-Type", "application/octet-stream");
-            try (OutputStream output = connection.getOutputStream()) { output.write(body); }
+            connection.connect();
+            try (OutputStream output = connection.getOutputStream()) {
+                requestBodyStarted = System.nanoTime();
+                output.write(body); output.flush();
+                requestBodyElapsedMs = Math.max(1, elapsed(requestBodyStarted));
+            }
         }
         int status = connection.getResponseCode();
+        if (requestBodyStarted != 0) requestAcknowledgedElapsedMs = Math.max(1, elapsed(requestBodyStarted));
+        long responseHeadersElapsedMs = Math.max(1, elapsed(started));
         InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
-        int total = 0; ByteArrayOutputStream bytes = new ByteArrayOutputStream(Math.min(maxResponse, 64 * 1024));
+        int total = 0; long firstByteElapsedMs = 0; long transferStarted = 0;
+        int captureLimit = Math.max(0, Math.min(maxResponse, maxCaptureBytes));
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(Math.min(captureLimit, 64 * 1024));
         if (stream != null) try (InputStream input = new BufferedInputStream(stream)) {
+            transferStarted = System.nanoTime();
             byte[] buffer = new byte[16 * 1024]; int read;
             while ((read = input.read(buffer)) >= 0) {
                 if (read == 0) continue;
+                if (firstByteElapsedMs == 0) firstByteElapsedMs = Math.max(1, elapsed(started));
                 total += read;
-                if (bytes.size() < maxResponse) bytes.write(buffer, 0, Math.min(read, maxResponse - bytes.size()));
+                if (bytes.size() < captureLimit) bytes.write(buffer, 0, Math.min(read, captureLimit - bytes.size()));
                 if (total >= maxResponse) break;
             }
         }
+        long totalElapsedMs = Math.max(1, elapsed(started));
+        long responseTransferElapsedMs = transferStarted == 0 ? 0 : Math.max(1, elapsed(transferStarted));
         String response = bytes.toString(StandardCharsets.UTF_8.name());
         String contentType = connection.getContentType();
-        connection.disconnect();
-        return new HttpResult(status, response, total, contentType);
+        if (forceClose) connection.disconnect();
+        return new HttpResult(status, response, total, contentType, totalElapsedMs, responseHeadersElapsedMs,
+                firstByteElapsedMs, responseTransferElapsedMs, requestBodyElapsedMs, requestAcknowledgedElapsedMs);
     }
 
     static boolean anyValidExit(JSONArray observations) {
@@ -671,7 +854,16 @@ final class ProbeSuite {
 
     static final class HttpResult {
         final int statusCode; final String body; final int bytesRead; final String contentType;
-        HttpResult(int statusCode, String body, int bytesRead, String contentType) { this.statusCode = statusCode; this.body = body; this.bytesRead = bytesRead; this.contentType = contentType; }
+        final long totalElapsedMs; final long responseHeadersElapsedMs; final long firstByteElapsedMs;
+        final long responseTransferElapsedMs; final long requestBodyElapsedMs; final long requestAcknowledgedElapsedMs;
+        HttpResult(int statusCode, String body, int bytesRead, String contentType, long totalElapsedMs,
+                   long responseHeadersElapsedMs, long firstByteElapsedMs, long responseTransferElapsedMs,
+                   long requestBodyElapsedMs, long requestAcknowledgedElapsedMs) {
+            this.statusCode = statusCode; this.body = body; this.bytesRead = bytesRead; this.contentType = contentType;
+            this.totalElapsedMs = totalElapsedMs; this.responseHeadersElapsedMs = responseHeadersElapsedMs;
+            this.firstByteElapsedMs = firstByteElapsedMs; this.responseTransferElapsedMs = responseTransferElapsedMs;
+            this.requestBodyElapsedMs = requestBodyElapsedMs; this.requestAcknowledgedElapsedMs = requestAcknowledgedElapsedMs;
+        }
     }
 
     private static final class InetAddressLoop {

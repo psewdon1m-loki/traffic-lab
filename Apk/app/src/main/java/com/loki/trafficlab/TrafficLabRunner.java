@@ -191,10 +191,8 @@ final class TrafficLabRunner {
 
             stages.put(ProbeSuite.socksDomain(session.socksPort));
             JSONObject performance = ProbeSuite.directPerformance(httpProxy);
-            stages.put(performance.has("downloadBytes") ? JsonUtil.passed("tunnel.download", performance.optLong("downloadElapsedMs"), performance)
-                    : JsonUtil.failed("tunnel.download", 0, "Bounded tunneled download failed.", performance));
-            stages.put(performance.has("uploadBytes") ? JsonUtil.passed("tunnel.upload", performance.optLong("uploadElapsedMs"), performance)
-                    : JsonUtil.failed("tunnel.upload", 0, "Bounded tunneled upload failed.", performance));
+            stages.put(ProbeSuite.performanceStage("tunnel.download", performance, "download"));
+            stages.put(ProbeSuite.performanceStage("tunnel.upload", performance, "upload"));
             stages.put(JsonUtil.partial("tunnel.httpProtocols", 0, "Android HttpURLConnection does not expose the negotiated HTTP version consistently; TLS ALPN is recorded separately.", null));
             stages.put(payloadMatrix(httpProxy));
             stages.put(JsonUtil.skipped("tunnel.controlledCanary", "No authorized controlled collector URL is configured in the Android UI."));
@@ -212,7 +210,7 @@ final class TrafficLabRunner {
             stages.put(JsonUtil.skipped("tunnel.http", "Tunnel core unavailable."));
             stages.put(JsonUtil.skipped("tunnel.authenticatedEndToEnd", "Tunnel core unavailable."));
         }
-        stages.put(logs == null ? JsonUtil.skipped("tunnel.logs", "No running core logs were available.") : JsonUtil.passed("tunnel.logs", 0, logs));
+        stages.put(AndroidLogClassifier.stage(logs));
         exitAttribution = ProbeSuite.attribution(ProbeSuite.validExitAddresses(tunnelExit));
         standardProgress.onProgress(92, 0, 0, "tunnel tests completed");
         checkCanceled();

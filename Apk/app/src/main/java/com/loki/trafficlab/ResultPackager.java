@@ -186,6 +186,8 @@ final class ResultPackager {
                 + "CONFIDENCE AND LIMITS\n---------------------\n"
                 + "High means a direct protocol response or Android OS API observation; medium means compatible external signals; low means a weak hint.\n"
                 + "Probabilities are heuristic evidence weights, not calibrated statistical probabilities.\n"
+                + "Speed uses one bounded calibration plus three adaptive measurement samples. recommendedMbps excludes calibration and is the measurement median payload transfer/acknowledgement rate; medianEffectiveMbps includes connection, TLS, TTFB and response overhead. Sample spread and confidence must be considered with either value.\n"
+                + "Core log markers are listed in connection.json data.logAnalysis as expected/benign or unexpected; only unexpected markers downgrade tunnel.logs.\n"
                 + "Exact server routing, second hop, REALITY target and panel/HWID policy require server-side state.\n";
     }
 

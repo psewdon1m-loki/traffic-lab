@@ -26,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.2.0.apk
+  Apk\releases\LokiTrafficLab-android-3.2.2.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -45,8 +45,11 @@ DEVICE WORKFLOW
    so it can be disabled first.
 4. The foreground test service shows percent, connection count, elapsed time,
    approximate ETA and the current stage. `Stop test` is emergency cancellation.
-5. When complete, use `Save ZIP` for Android's system document picker or
+5. Only after completion, a `Result export` block appears in the main screen
+   with run metadata. Use `Save ZIP` for Android's system document picker or
    `Share ZIP` for the system Sharesheet (messengers, mail, storage providers).
+   The block remains available for repeated exports until a new test starts or
+   `Clear connections` deletes the temporary result.
 6. `Clear connections` removes the visible list and deletes the temporary ZIP.
 
 The result ZIP is created only below the app's private cache. It is never copied
@@ -64,9 +67,25 @@ Google/Cloudflare DoH, direct UDP DNS, resolver comparison, repeated TCP,
 TLS/REALITY fallback and SNI/certificate/SPKI matrix, plain WebSocket upgrade,
 RIPEstat ASN/BGP and IP-geolocation hints, Android ping-TTL path evidence,
 embedded Xray validation/start, authenticated HTTP, exit-IP comparison, SOCKS
-remote-domain DNS, bounded download/upload and payload matrix, stability, real
+remote-domain DNS, one calibration plus three adaptive download/upload
+measurement samples and payload matrix, stability, real
 SOCKS5 UDP DNS, tunneled STUN mapping, invalid UUID/shortId/SNI controls, explicit XUDP A/B testing,
-core logs, shared-backend grouping, infrastructure signals and OSI mapping.
+classified core logs, shared-backend grouping, infrastructure signals and OSI mapping.
+
+Throughput uses one bounded calibration sample and three adaptively sized samples.
+It reports a median payload rate separately from effective request rate, setup/
+TTFB, sample spread and confidence. The calibration result chooses the bounded
+payload size but is excluded from the recommended median. Download payload time begins after response
+headers; upload payload time ends only when the speed endpoint acknowledges the
+request. A failed sample or high variation is retained as PARTIAL instead of
+being hidden behind a single Mbps number. The first request asks for a closed
+connection and later requests permit keep-alive reuse; connection reuse remains
+an explicit client-side request rather than an unprovable server-side fact.
+
+The Xray log classifier labels readiness EOF, completed UDP-association teardown
+and loopback broken-pipe/reset caused by a completed or timed-out app probe as
+expected/benign. Other failure markers remain unexpected and make tunnel.logs
+PARTIAL with the exact redacted evidence in data.logAnalysis.
 
 Extended mode additionally records 6 cold and 6 warm HTTP observations, 20
 parallel TCP flows, 20 independent SOCKS5 UDP associations, tunneled DNS
