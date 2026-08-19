@@ -32,7 +32,8 @@ public class ResultContractTest {
         JSONArray extended = new JSONArray().put(JsonUtil.passed("tunnel.extended.soak", 300_000, JsonUtil.object("attempts", 250)));
         TrafficLabRunner.ProfileResult profile = new TrafficLabRunner.ProfileResult(
                 "profile-01", 1, "sample", "fingerprint", new JSONObject(), Collections.emptyList(), Collections.emptyList(),
-                new JSONArray(), new JSONArray(), new JSONArray(), standard, extended, new JSONArray(), true);
+                new JSONArray(), new JSONArray(), new JSONArray(), standard, extended, new JSONArray(), true,
+                JsonUtil.object("outcome", "PASS", "reasonCode", "AUTHENTICATED_E2E_SUCCEEDED", "reason", "test"));
         ResultPackager.PackageInput input = input(TrafficLabRunner.TestType.EXTENDED, Collections.singletonList(profile));
         JSONObject result = ResultPackager.extendedJson(input, profile);
         assertEquals("extended-test-results", result.getString("outputType"));
@@ -61,6 +62,7 @@ public class ResultContractTest {
 
     private static ResultPackager.PackageInput input(TrafficLabRunner.TestType type, java.util.List<TrafficLabRunner.ProfileResult> profiles) {
         return new ResultPackager.PackageInput("run-12345678", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z", 60_000,
-                "Xray test", new JSONObject(), new JSONArray(), new JSONArray(), profiles, type);
+                "Xray test", new JSONObject(), new JSONArray(), new JSONArray(), profiles, type,
+                JsonUtil.object("outcome", "PASS", "reasonCode", "RUN_COMPLETED_WITH_USABLE_PROFILE", "reason", "test"));
     }
 }

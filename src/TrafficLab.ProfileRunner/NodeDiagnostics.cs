@@ -6,6 +6,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -25,6 +26,8 @@ internal static class NodeDiagnostics
         var directStun = await ProbeDirectStunAsync(timeout);
         var publicIps = directBaseline.Where(item => item.Valid && item.Ip is not null).Select(item => item.Ip!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var localIps = active.SelectMany(item => item.Addresses).Where(value => IPAddress.TryParse(value, out var ip) && ip.AddressFamily == AddressFamily.InterNetwork).Distinct().ToArray();
+        var ipGeolocation = BuildNodeGeo(directAttribution);
+        var deviceLocation = await CaptureDeviceLocationAsync(context, timeout);
 
         return new NodeDiagnosticsReport
         {
@@ -37,7 +40,9 @@ internal static class NodeDiagnostics
             LocalAddresses = active.SelectMany(item => item.Addresses).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
             PublicAddresses = publicIps,
             Provider = BuildProvider(directAttribution),
-            Geolocation = BuildNodeGeo(directAttribution),
+            Geolocation = ipGeolocation,
+            DeviceLocation = deviceLocation,
+            GeolocationComparison = CompareLocations(deviceLocation, ipGeolocation),
             DirectPerformance = await ProbeDirectPerformanceAsync(timeout),
             Nat = BuildNatReport(localIps, publicIps, directStun, route),
             Gateway = gateway,
@@ -50,7 +55,7 @@ internal static class NodeDiagnostics
                 "The detected access type is an adapter/route observation. USB or Wi-Fi phone tethering can hide an LTE/5G underlay unless the test plan labels it.",
                 "NAT presence can be inferred by comparing local, STUN and public addresses; cone/symmetric NAT classification requires a purpose-built multi-address STUN server.",
                 "Router manufacturer/model is reported only when the gateway advertises safe UPnP/SSDP metadata. Absence is not evidence that no router exists.",
-                "IP geolocation describes a public egress prefix and cannot locate the test PC, Wi-Fi AP, LTE tower or subscriber precisely."
+                "IP geolocation describes a public egress prefix. Device location is reported separately only when explicitly supplied or the operating-system location service grants it; neither source identifies an LTE tower."
             ]
         };
     }
@@ -210,6 +215,135 @@ internal static class NodeDiagnostics
             Sources = hints.Select(item => item.Source).Distinct().ToArray(),
             Limitation = "This locates the public IP prefix only. It must not be treated as the physical location of the PC, router or LTE cell."
         };
+    }
+
+    private static async Task<DeviceLocationObservation> CaptureDeviceLocationAsync(TestContext context, TimeSpan timeout)
+    {
+        if (context.Latitude.HasValue && context.Longitude.HasValue)
+            return new DeviceLocationObservation
+            {
+                Status = "observed",
+                Latitude = Math.Round(context.Latitude.Value, 6),
+                Longitude = Math.Round(context.Longitude.Value, 6),
+                Source = "test-context/user-supplied",
+                Confidence = "high-user-declared",
+                CapturedAt = DateTimeOffset.UtcNow,
+                Limitation = "Coordinates were supplied by the test plan/operator and were not independently verified by Traffic Lab."
+            };
+
+        if (OperatingSystem.IsWindows())
+        {
+            const string script = """
+                $ErrorActionPreference='Stop'
+                Add-Type -AssemblyName System.Runtime.WindowsRuntime
+                $locator=[Windows.Devices.Geolocation.Geolocator,Windows.Devices.Geolocation,ContentType=WindowsRuntime]::new()
+                $locator.DesiredAccuracy=[Windows.Devices.Geolocation.PositionAccuracy]::High
+                $operation=$locator.GetGeopositionAsync([TimeSpan]::FromMinutes(10),[TimeSpan]::FromSeconds(8))
+                $method=[System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } | Select-Object -First 1
+                $task=$method.MakeGenericMethod([Windows.Devices.Geolocation.Geoposition]).Invoke($null,@($operation))
+                if(-not $task.Wait(10000)){throw 'Windows location request timed out'}
+                $coordinate=$task.Result.Coordinate
+                [pscustomobject]@{latitude=$coordinate.Point.Position.Latitude;longitude=$coordinate.Point.Position.Longitude;accuracyMeters=$coordinate.Accuracy;altitudeMeters=$coordinate.Point.Position.Altitude;capturedAt=$coordinate.Timestamp.ToString('O');source='windows-location-api'} | ConvertTo-Json -Compress
+                """;
+            var result = await RunProcessAsync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], TimeSpan.FromSeconds(Math.Min(14, Math.Max(10, timeout.TotalSeconds))));
+            var parsed = ParseDeviceLocationJson(result.Stdout, "windows-location-api", result.Stderr);
+            if (parsed.Status == "observed") return parsed;
+            return parsed with { Limitation = "Windows Location Service did not return a position. Location may be disabled, denied, stale, or unavailable on this hardware." };
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            foreach (var command in new[] { "where-am-i", "geoclue-where-am-i" })
+            {
+                var result = await RunProcessAsync(command, [], TimeSpan.FromSeconds(Math.Min(8, Math.Max(3, timeout.TotalSeconds))));
+                if (result.ExitCode != 0) continue;
+                var latitude = ParseFirstDouble(Regex.Match(result.Stdout, @"(?im)^\s*Latitude\s*:\s*(?<value>-?[\d.]+)").Groups["value"].Value);
+                var longitude = ParseFirstDouble(Regex.Match(result.Stdout, @"(?im)^\s*Longitude\s*:\s*(?<value>-?[\d.]+)").Groups["value"].Value);
+                var accuracy = ParseFirstDouble(Regex.Match(result.Stdout, @"(?im)^\s*Accuracy\s*:\s*(?<value>[\d.]+)").Groups["value"].Value);
+                if (latitude.HasValue && longitude.HasValue)
+                    return new DeviceLocationObservation
+                    {
+                        Status = "observed",
+                        Latitude = Math.Round(latitude.Value, 6),
+                        Longitude = Math.Round(longitude.Value, 6),
+                        AccuracyMeters = accuracy,
+                        CapturedAt = DateTimeOffset.UtcNow,
+                        Source = "geoclue/system-location",
+                        Confidence = accuracy is <= 100 ? "high-os-location" : "medium-os-location",
+                        Limitation = "GeoClue position is supplied by the operating system and may combine Wi-Fi, GNSS and network hints."
+                    };
+            }
+            return new DeviceLocationObservation
+            {
+                Status = "unavailable",
+                Source = "geoclue/system-location",
+                Confidence = "unavailable",
+                Limitation = "No automatic GeoClue client was available or authorized. Use --latitude/--longitude or test-plan coordinates without installing a Traffic Lab dependency."
+            };
+        }
+
+        return new DeviceLocationObservation { Status = "unsupported", Confidence = "unavailable", Limitation = "Automatic device location is not implemented for this platform." };
+    }
+
+    private static DeviceLocationObservation ParseDeviceLocationJson(string json, string source, string error)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json.Trim());
+            var root = document.RootElement;
+            var latitude = root.GetProperty("latitude").GetDouble();
+            var longitude = root.GetProperty("longitude").GetDouble();
+            var accuracy = root.TryGetProperty("accuracyMeters", out var accuracyValue) && accuracyValue.TryGetDouble(out var meters) ? meters : (double?)null;
+            return new DeviceLocationObservation
+            {
+                Status = "observed",
+                Latitude = Math.Round(latitude, 6),
+                Longitude = Math.Round(longitude, 6),
+                AccuracyMeters = accuracy,
+                AltitudeMeters = root.TryGetProperty("altitudeMeters", out var altitude) && altitude.TryGetDouble(out var altitudeMeters) ? altitudeMeters : null,
+                CapturedAt = root.TryGetProperty("capturedAt", out var captured) && DateTimeOffset.TryParse(captured.GetString(), out var capturedAt) ? capturedAt : DateTimeOffset.UtcNow,
+                Source = source,
+                Confidence = accuracy is <= 100 ? "high-os-location" : accuracy is <= 1000 ? "medium-os-location" : "low-os-location",
+                Limitation = "Operating-system location can be stale or inferred and is not proof of the access point, router, or LTE-cell position."
+            };
+        }
+        catch
+        {
+            return new DeviceLocationObservation { Status = "unavailable", Source = source, Confidence = "unavailable", Error = ProgramAccess.Truncate(ProgramAccess.Redact(error), 300) };
+        }
+    }
+
+    private static DeviceIpGeolocationComparison CompareLocations(DeviceLocationObservation device, NodeGeolocation ip)
+    {
+        if (!device.Latitude.HasValue || !device.Longitude.HasValue || !ip.Latitude.HasValue || !ip.Longitude.HasValue)
+            return new DeviceIpGeolocationComparison
+            {
+                Status = "inconclusive",
+                Interpretation = "Both an OS/device position and an IP-prefix position are required for a distance comparison."
+            };
+        var distance = HaversineKm(device.Latitude.Value, device.Longitude.Value, ip.Latitude.Value, ip.Longitude.Value);
+        return new DeviceIpGeolocationComparison
+        {
+            Status = distance <= 100 ? "consistent" : distance <= 500 ? "coarsely-consistent" : "divergent",
+            DistanceKm = Math.Round(distance, 1),
+            DeviceAccuracyMeters = device.AccuracyMeters,
+            IpEstimatedRadiusKm = ip.EstimatedRadiusKm,
+            Interpretation = distance <= 100
+                ? "The device and public-prefix hints are geographically compatible at city/region scale."
+                : distance <= 500
+                    ? "The hints agree only at broad regional scale; IP geolocation is coarse."
+                    : "The public-IP location is far from the device position, which can indicate remote egress, VPN/proxy routing, mobile-core breakout, or inaccurate IP geolocation."
+        };
+    }
+
+    private static double HaversineKm(double latitude1, double longitude1, double latitude2, double longitude2)
+    {
+        const double radius = 6371.0088;
+        var dLat = (latitude2 - latitude1) * Math.PI / 180;
+        var dLon = (longitude2 - longitude1) * Math.PI / 180;
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2)
+            + Math.Cos(latitude1 * Math.PI / 180) * Math.Cos(latitude2 * Math.PI / 180) * Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        return radius * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
     }
 
     private static async Task<DirectPerformanceReport> ProbeDirectPerformanceAsync(TimeSpan timeout)
@@ -774,6 +908,8 @@ internal sealed class NodeDiagnosticsReport
     public IReadOnlyList<string> PublicAddresses { get; init; } = [];
     public NodeProvider Provider { get; init; } = new();
     public NodeGeolocation Geolocation { get; init; } = new();
+    public DeviceLocationObservation DeviceLocation { get; init; } = new();
+    public DeviceIpGeolocationComparison GeolocationComparison { get; init; } = new();
     public DirectPerformanceReport DirectPerformance { get; init; } = new();
     public NatDiagnostics Nat { get; init; } = new();
     public GatewayDiagnostics Gateway { get; init; } = new();
@@ -803,6 +939,29 @@ internal sealed class NodeGeolocation
     public string Confidence { get; init; } = "unavailable";
     public IReadOnlyList<string> Sources { get; init; } = [];
     public string? Limitation { get; init; }
+}
+
+internal sealed record DeviceLocationObservation
+{
+    public string Status { get; init; } = "unavailable";
+    public double? Latitude { get; init; }
+    public double? Longitude { get; init; }
+    public double? AccuracyMeters { get; init; }
+    public double? AltitudeMeters { get; init; }
+    public DateTimeOffset? CapturedAt { get; init; }
+    public string? Source { get; init; }
+    public string Confidence { get; init; } = "unavailable";
+    public string? Error { get; init; }
+    public string? Limitation { get; init; }
+}
+
+internal sealed class DeviceIpGeolocationComparison
+{
+    public string Status { get; init; } = "inconclusive";
+    public double? DistanceKm { get; init; }
+    public double? DeviceAccuracyMeters { get; init; }
+    public double? IpEstimatedRadiusKm { get; init; }
+    public string? Interpretation { get; init; }
 }
 
 internal sealed class DirectPerformanceReport

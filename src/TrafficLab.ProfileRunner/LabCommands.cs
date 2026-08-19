@@ -298,7 +298,8 @@ internal sealed class PortableTestPlan
         Provider = Provider,
         RestrictionState = RestrictionState,
         Latitude = Latitude,
-        Longitude = Longitude
+        Longitude = Longitude,
+        LocationSource = Latitude.HasValue && Longitude.HasValue ? "test-context/user-supplied" : null
     };
 }
 
@@ -313,8 +314,9 @@ internal sealed class TestContext
     public string? AccessType { get; init; }
     public string? Provider { get; init; }
     public string RestrictionState { get; init; } = "unknown";
-    public double? Latitude { get; init; }
-    public double? Longitude { get; init; }
+    public double? Latitude { get; set; }
+    public double? Longitude { get; set; }
+    public string? LocationSource { get; set; }
 }
 
 internal sealed class ComparisonReport

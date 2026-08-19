@@ -674,7 +674,24 @@ internal static class ExtendedDiagnostics
 
     public static string ComputeProfileFingerprint(DeclaredProfile profile)
     {
-        var material = string.Join('|', profile.Protocol, profile.Host, profile.Port, profile.Security, profile.Network, profile.Sni, profile.Path, profile.ServiceName, profile.HostHeader, profile.PacketEncoding);
+        static string Lower(string? value, bool trimDot = false)
+        {
+            var normalized = (value ?? "").Trim();
+            if (trimDot) normalized = normalized.TrimEnd('.');
+            return normalized.ToLowerInvariant();
+        }
+        var material = string.Join('|',
+            "v2",
+            Lower(profile.Protocol),
+            Lower(profile.Host, trimDot: true),
+            profile.Port.ToString(CultureInfo.InvariantCulture),
+            Lower(profile.Security),
+            Lower(profile.Network),
+            Lower(profile.Sni, trimDot: true),
+            profile.Path ?? "",
+            profile.ServiceName ?? "",
+            Lower(profile.HostHeader, trimDot: true),
+            Lower(profile.PacketEncoding));
         return Hex(SHA256.HashData(Encoding.UTF8.GetBytes(material)))[..16];
     }
 

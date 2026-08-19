@@ -1,4 +1,4 @@
-LOKI TRAFFIC LAB 3.2.2 - UBUNTU / LINUX
+LOKI TRAFFIC LAB 3.3.0 - UBUNTU / LINUX
 =======================================
 
 This directory contains the headless Linux adaptation of Traffic Lab. Ubuntu
@@ -10,16 +10,17 @@ INSTALL
 
 From a local checkout/release directory:
 
-  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.2.2.tar.gz
+  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.3.0.tar.gz
 
 For a hosted release, bootstrap also supports a one-line installation:
 
-  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.2.2.tar.gz
+  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.3.0.tar.gz
 
 The installer requires and verifies the archive SHA-256 sidecar, installs
 versioned files below /opt/tlab, creates /usr/local/bin/tlab, initializes a
 private per-user connections file and installs the small Ubuntu runtime set
-(certificates, ICU, libnuma, iproute2, ping, traceroute and iw). It never
+(certificates, libnuma, iproute2, ping, traceroute and iw). The self-contained
+runner uses invariant globalization and does not require system ICU. It never
 disables or flushes UFW.
 
 CONFIGURATION
@@ -68,11 +69,22 @@ only long/disruptive stages, core-log classification and throughput correlation.
 README.txt and JSON run metadata explicitly identify NORMAL versus EXTENDED.
 Multiple connections receive ordered, named folders inside the archive.
 
+Traffic Lab 3.3.0 preserves status for compatibility and adds outcome,
+reasonCode and a human-readable reason to every stage, profile and run. The
+causal classes are PASS, PROXY_FAIL, UNDERLAY_FAIL, TEST_FAILURE and UNKNOWN;
+PROXY_PATH_FAIL and PROTOCOL_AUTH_FAIL distinguish endpoint reachability from
+authentication/protocol failure.
+
 The metadata records platform=linux, the Linux distribution from
 /etc/os-release (for example Ubuntu 24.04 LTS), kernel/OS version, CPU
 architecture, runtime and time zone. These fields are also present in
 local-machine.json; platform and OS are repeated in connection.json and
 extended-test.json so files remain attributable when extracted separately.
+Coordinates supplied by --latitude/--longitude or the test plan are recorded as
+device location. If a system GeoClue `where-am-i` helper is already available
+and authorized, Traffic Lab also attempts to read it. This helper is optional,
+not an installation dependency; without it the report retains the separate
+low-confidence public-IP geolocation hint.
 
 LINUX-SPECIFIC EVIDENCE
 -----------------------
@@ -110,7 +122,7 @@ After bootstrap, `tlab start` does not download packages and does not require a
 separate dotnet, xray, curl, dig, whois, OpenSSL or Node.js installation.
 
 Bootstrap is still an installation step: on Ubuntu it installs missing standard
-OS packages for certificates/ICU/NUMA plus iproute2, ping, traceroute, iw,
+OS packages for certificates/NUMA plus iproute2, ping, traceroute, iw,
 tcpdump and util-linux. Network measurements also necessarily contact external
 DNS/DoH, RDAP/BGP, geolocation, STUN, exit-IP and HTTP test endpoints. If one of
 those services is blocked, its stage is reported as failed/partial/skipped; it
@@ -123,7 +135,7 @@ BUILD
 
 From PowerShell at the repository root:
 
-  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.2.2' -Archive
+  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.3.0' -Archive
 
 Generated releases are placed in Linux/releases. Shared C# logic remains in
 traffic-lab/src; this folder contains only Linux packaging, runtime assets and

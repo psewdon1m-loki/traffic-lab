@@ -26,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.2.2.apk
+  Apk\releases\LokiTrafficLab-android-3.3.0.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -106,30 +106,39 @@ Android-specific local-machine evidence includes:
 - Wi-Fi standard, frequency, RSSI, signal level and negotiated RX/TX rates;
 - LTE/NR/data/voice network type, carrier/SIM summaries and signal levels;
 - Android/device/API/security-patch/kernel/ABI, battery saver, idle and airplane
-  modes, direct IP/provider/geolocation/performance, STUN and NAT evidence.
+  modes, direct IP/provider/geolocation/performance, STUN and NAT evidence;
+- an Android OS device-location fix (coordinates, accuracy, provider, age and
+  mock flag) when the user grants location permission, plus distance from the
+  low-confidence public-IP location hint.
 
 SSID/BSSID/MAC are hashed. Phone number, IMSI, ICCID, precise cell identity and
-GPS location are not collected. Permission denial reduces only Wi-Fi/cellular
-detail and is recorded rather than aborting the test.
+cell-tower identity are not collected. Device coordinates are sensitive and are
+included only when Android grants the runtime location permission. Permission
+denial is recorded and does not abort the test.
+
+Every stage keeps the compatibility status field and also records a causal
+outcome, reasonCode and explanation. Profile/run outcomes are PASS, PROXY_FAIL,
+UNDERLAY_FAIL, TEST_FAILURE or UNKNOWN. A reachable direct control followed by
+endpoint TCP failure is PROXY_FAIL/PROXY_PATH_FAIL; reachable endpoint TCP
+followed by failed authenticated traffic is PROXY_FAIL/PROTOCOL_AUTH_FAIL.
 
 COVERAGE ESTIMATE
 -----------------
 
 Against the 37 per-profile Windows stage families, Android implements 32 fully
-and 3 with an explicit partial result: 35/37, or about 95% functional/partial
-coverage. The partial families are path-MTU, per-hop route attribution and
-negotiated HTTP-version evidence. The two remaining capability gaps are the
+and exposes 3 as explicit platform limitations: 35/37, or about 95% functional
+or honestly classified coverage. Path-MTU, per-hop route attribution and
+negotiated HTTP-version evidence are SKIPPED/UNSUPPORTED_ON_PLATFORM rather than
+being misreported as degraded connections. The two remaining capability gaps are the
 optional controlled-collector UI and a native QUIC handshake engine. This
 comparison excludes Windows-only utilities such as pktmon capture, history DB
 commands and the standalone collector service, and excludes Android-only node
 evidence.
 
-The API 35 x86_64 emulator acceptance run with the supplied REALITY profile
-produced 31 passed, 3 partial, 0 failed and 3 skipped standard stages. The skipped plain
-WebSocket stage was not applicable to that TCP profile; controlled canary and
-QUIC were unavailable. A two-profile sequential run produced two ordered ZIP
-folders with exactly four normal-result files in each. Both archives were scanned to
-confirm that the supplied UUID was absent.
+Acceptance tests cover canonical cross-platform profile fingerprints, causal
+outcomes, benign Xray lifecycle/deprecation markers, result contracts and the
+normal/extended package split. Emulator/device runs still remain necessary for
+real radio, location, VPN and end-to-end profile behavior.
 
 KNOWN GAPS
 ----------

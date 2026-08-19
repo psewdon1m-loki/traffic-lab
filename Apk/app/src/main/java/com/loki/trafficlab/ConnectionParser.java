@@ -165,8 +165,9 @@ final class ConnectionParser {
 
         String fingerprint() {
             try {
-                String input = String.join("|", "vless", host, Integer.toString(port), nullToEmpty(security),
-                        nullToEmpty(network), nullToEmpty(sni), nullToEmpty(path), nullToEmpty(serviceName));
+                String input = String.join("|", "v2", lower("vless", false), lower(host, true), Integer.toString(port),
+                        lower(security, false), lower(network, false), lower(sni, true), nullToEmpty(path),
+                        nullToEmpty(serviceName), lower(hostHeader, true), lower(packetEncoding, false));
                 byte[] digest = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
                 StringBuilder hex = new StringBuilder();
                 for (byte b : digest) hex.append(String.format(Locale.ROOT, "%02x", b));
@@ -193,5 +194,10 @@ final class ConnectionParser {
         }
 
         private static String nullToEmpty(String value) { return value == null ? "" : value; }
+        private static String lower(String value, boolean trimTrailingDot) {
+            String normalized = nullToEmpty(value).trim();
+            if (trimTrailingDot) while (normalized.endsWith(".")) normalized = normalized.substring(0, normalized.length() - 1);
+            return normalized.toLowerCase(Locale.ROOT);
+        }
     }
 }

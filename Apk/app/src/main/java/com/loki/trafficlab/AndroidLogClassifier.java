@@ -77,6 +77,16 @@ final class AndroidLogClassifier {
                 && (value.contains("closed pipe") || value.contains(" > eof") || value.endsWith("eof"))) {
             return "completed_udp_association_teardown";
         }
+        if (value.contains("websocket: close 1000")) {
+            return "normal_websocket_close";
+        }
+        if ((value.contains("websocket") || value.contains("grpc"))
+                && (value.contains("deprecated") || value.contains("legacy transport"))) {
+            return "transport_deprecation_notice";
+        }
+        if (value.contains("xtls") && value.contains("rejected udp/443 traffic")) {
+            return "udp_quic_probe_policy_notice";
+        }
         return null;
     }
 }

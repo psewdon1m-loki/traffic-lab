@@ -3,6 +3,9 @@ package com.loki.trafficlab;
 import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.content.Context;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationManager;
 import android.net.ConnectivityManager;
 import android.net.DhcpInfo;
 import android.net.LinkAddress;
@@ -16,6 +19,8 @@ import android.net.wifi.WifiManager;
 import android.net.wifi.ScanResult;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.CancellationSignal;
+import android.os.SystemClock;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.telephony.CellInfo;
@@ -37,6 +42,11 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 final class AndroidNetworkDiagnostics {
     private AndroidNetworkDiagnostics() {}
@@ -91,12 +101,109 @@ final class AndroidNetworkDiagnostics {
         JsonUtil.put(root, "interfaces", captureInterfaces());
         JsonUtil.put(root, "wifi", captureWifi(context));
         JsonUtil.put(root, "cellular", captureCellular(context));
+        JsonUtil.put(root, "deviceLocation", captureDeviceLocation(context));
         JsonUtil.put(root, "powerAndPolicy", capturePowerAndPolicy(context));
         JsonUtil.put(root, "limitations", new JSONArray()
                 .put("Android exposes the active route, transports and radio summaries, but not upstream VLANs, carrier routing policy or the physical LTE tower location.")
                 .put("SSID/BSSID and interface MAC values are hashed; subscriber identifiers, phone number, IMSI, ICCID and precise cell identity are never collected.")
-                .put("IP geolocation describes an egress prefix and is not device GPS or proof of physical location."));
+                .put("When runtime permission is granted, deviceLocation contains a sensitive OS location fix with accuracy and age. It is separate from IP-prefix geolocation and is not proof of an LTE tower."));
         return root;
+    }
+
+    @SuppressLint("MissingPermission")
+    private static JSONObject captureDeviceLocation(Context context) {
+        JSONObject value = new JSONObject();
+        boolean coarse = context.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean fine = context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        JsonUtil.put(value, "permission", fine ? "fine" : coarse ? "coarse" : "denied");
+        JsonUtil.put(value, "requestedBy", "user-initiated-network-test");
+        JsonUtil.put(value, "sensitive", true);
+        if (!coarse && !fine) {
+            JsonUtil.put(value, "status", "permission-denied");
+            JsonUtil.put(value, "limitation", "Android location permission was not granted; only IP-prefix geolocation is available.");
+            return value;
+        }
+        LocationManager manager = context.getSystemService(LocationManager.class);
+        if (manager == null) {
+            JsonUtil.put(value, "status", "unavailable");
+            JsonUtil.put(value, "limitation", "Android LocationManager is unavailable.");
+            return value;
+        }
+        Location best = null;
+        try {
+            for (String provider : manager.getProviders(true)) {
+                Location candidate = manager.getLastKnownLocation(provider);
+                if (betterLocation(candidate, best)) best = candidate;
+            }
+            long ageMs = locationAgeMs(best);
+            if (Build.VERSION.SDK_INT >= 30 && (best == null || ageMs > 120_000 || best.getAccuracy() > 200)) {
+                String provider = preferredProvider(manager);
+                if (provider != null) {
+                    CountDownLatch latch = new CountDownLatch(1);
+                    AtomicReference<Location> current = new AtomicReference<>();
+                    CancellationSignal cancellation = new CancellationSignal();
+                    ExecutorService executor = Executors.newSingleThreadExecutor();
+                    try {
+                        manager.getCurrentLocation(provider, cancellation, executor, location -> { current.set(location); latch.countDown(); });
+                        latch.await(6, TimeUnit.SECONDS);
+                    } finally {
+                        cancellation.cancel(); executor.shutdownNow();
+                    }
+                    if (betterLocation(current.get(), best)) best = current.get();
+                }
+            }
+        } catch (SecurityException error) {
+            JsonUtil.put(value, "status", "permission-denied");
+            JsonUtil.put(value, "error", "Location permission changed during capture.");
+            return value;
+        } catch (Exception error) {
+            JsonUtil.put(value, "captureError", JsonUtil.redact(error.getClass().getSimpleName()));
+        }
+        if (best == null) {
+            JsonUtil.put(value, "status", "unavailable");
+            JsonUtil.put(value, "locationServicesEnabled", Build.VERSION.SDK_INT < 28 || manager.isLocationEnabled());
+            JsonUtil.put(value, "limitation", "No current or cached OS location fix was available.");
+            return value;
+        }
+        JsonUtil.put(value, "status", "observed");
+        JsonUtil.put(value, "latitude", round(best.getLatitude(), 6));
+        JsonUtil.put(value, "longitude", round(best.getLongitude(), 6));
+        JsonUtil.put(value, "accuracyMeters", round(best.getAccuracy(), 1));
+        if (best.hasAltitude()) JsonUtil.put(value, "altitudeMeters", round(best.getAltitude(), 1));
+        JsonUtil.put(value, "provider", best.getProvider());
+        JsonUtil.put(value, "capturedAtEpochMs", best.getTime());
+        JsonUtil.put(value, "ageMsAtCapture", locationAgeMs(best));
+        JsonUtil.put(value, "mock", Build.VERSION.SDK_INT >= 31 ? best.isMock() : best.isFromMockProvider());
+        JsonUtil.put(value, "confidence", best.getAccuracy() <= 100 ? "high-os-location" : best.getAccuracy() <= 1000 ? "medium-os-location" : "low-os-location");
+        JsonUtil.put(value, "limitation", "This is a device position supplied by Android; it can be cached, inferred, or mocked and does not locate the router, proxy endpoint, or LTE cell.");
+        return value;
+    }
+
+    private static String preferredProvider(LocationManager manager) {
+        List<String> enabled = manager.getProviders(true);
+        if (Build.VERSION.SDK_INT >= 31 && enabled.contains(LocationManager.FUSED_PROVIDER)) return LocationManager.FUSED_PROVIDER;
+        if (enabled.contains(LocationManager.GPS_PROVIDER)) return LocationManager.GPS_PROVIDER;
+        if (enabled.contains(LocationManager.NETWORK_PROVIDER)) return LocationManager.NETWORK_PROVIDER;
+        return enabled.isEmpty() ? null : enabled.get(0);
+    }
+
+    private static boolean betterLocation(Location candidate, Location current) {
+        if (candidate == null) return false;
+        if (current == null) return true;
+        long candidateAge = locationAgeMs(candidate), currentAge = locationAgeMs(current);
+        if (candidateAge + 120_000 < currentAge) return true;
+        if (currentAge + 120_000 < candidateAge) return false;
+        return candidate.getAccuracy() < current.getAccuracy();
+    }
+
+    private static long locationAgeMs(Location location) {
+        if (location == null) return Long.MAX_VALUE;
+        if (location.getElapsedRealtimeNanos() > 0) return Math.max(0, (SystemClock.elapsedRealtimeNanos() - location.getElapsedRealtimeNanos()) / 1_000_000L);
+        return Math.max(0, System.currentTimeMillis() - location.getTime());
+    }
+
+    private static double round(double value, int digits) {
+        double scale = Math.pow(10, digits); return Math.round(value * scale) / scale;
     }
 
     private static JSONObject captureDevice(Context context) {

@@ -1,5 +1,11 @@
-Loki Traffic Lab Portable 3.2.2
+Loki Traffic Lab Portable 3.3.0
 ==============================
+
+Results preserve status and add causal outcome/reason fields at stage, profile
+and run level: PASS, PROXY_FAIL, UNDERLAY_FAIL, TEST_FAILURE or UNKNOWN. Windows
+Location Service is queried on a best-effort basis; when permission/service is
+unavailable the report records that fact and continues with IP-prefix geo only.
+Device coordinates are sensitive and are stored with source and accuracy.
 
 This directory is self-contained. The target Windows PC does not need .NET,
 Xray, curl, dig, OpenSSL, Node.js, or any PowerShell module installed.

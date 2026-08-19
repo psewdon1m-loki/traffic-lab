@@ -750,11 +750,11 @@ final class ProbeSuite {
     }
 
     static List<String> validExitAddresses(JSONArray observations) {
-        List<String> result = new ArrayList<>();
+        Set<String> unique = new LinkedHashSet<>();
         for (int i = 0; i < observations.length(); i++) {
-            JSONObject item = observations.optJSONObject(i); if (item != null && item.optBoolean("valid")) result.add(item.optString("ip"));
+            JSONObject item = observations.optJSONObject(i); if (item != null && item.optBoolean("valid") && !item.optString("ip").isEmpty()) unique.add(item.optString("ip"));
         }
-        return result;
+        return new ArrayList<>(unique);
     }
 
     static long elapsed(long startedNanos) { return Math.max(0, (System.nanoTime() - startedNanos) / 1_000_000L); }

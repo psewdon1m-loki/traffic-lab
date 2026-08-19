@@ -69,6 +69,7 @@ internal static class ResultPackageBuilder
             ? profile.Stages.Where(item => !item.Stage.StartsWith("tunnel.extended.", StringComparison.OrdinalIgnoreCase)).ToArray()
             : profile.Stages.ToArray();
         var statusCounts = connectionStages.GroupBy(item => item.Status).ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var outcomeCounts = connectionStages.GroupBy(item => item.Outcome).ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         return new
         {
             schemaVersion = "1.0",
@@ -87,6 +88,7 @@ internal static class ResultPackageBuilder
                 report.TestContext.Scenario,
                 report.Environment.Platform,
                 report.Environment.OperatingSystem,
+                outcome = report.Outcome,
                 inputSource = report.Input.Source
             },
             connection = new
@@ -96,12 +98,15 @@ internal static class ResultPackageBuilder
                 profile.SourceLine,
                 profile.Name,
                 profile.ProfileFingerprint,
+                profileFingerprintAlgorithm = "sha256-canonical-v2-truncated-16",
                 profile.Declared,
                 profile.ObservedEndpointIps,
                 profile.ObservedCamouflageIps,
                 profile.ObservedSocketIps,
                 profile.ExitAttribution,
                 statusCounts,
+                outcomeCounts,
+                outcome = profile.Outcome,
                 stages = connectionStages,
                 extendedResultsFile = report.ExtendedTest.Enabled ? "extended-test.json" : null,
                 inferences = profile.Inferences,
@@ -125,6 +130,7 @@ internal static class ResultPackageBuilder
         var logClassification = profile.Stages.FirstOrDefault(item => item.Stage == "tunnel.logs");
         var tunnelDownload = profile.Stages.FirstOrDefault(item => item.Stage == "tunnel.download");
         var counts = stages.GroupBy(item => item.Status).ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var outcomeCounts = stages.GroupBy(item => item.Outcome).ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         return new
         {
             schemaVersion = "1.0",
@@ -146,7 +152,9 @@ internal static class ResultPackageBuilder
                 report.Environment.Architecture
             },
             connection = new { profile.ProfileId, profile.SourceOrdinal, profile.Name, profile.ProfileFingerprint },
+            outcome = profile.Outcome,
             statusCounts = counts,
+            outcomeCounts,
             stages,
             coreLogClassification = logClassification,
             throughputAnalysis = new
@@ -169,7 +177,7 @@ internal static class ResultPackageBuilder
             outputType = "local-machine-and-network-characteristics",
             generatedAt = DateTimeOffset.UtcNow,
             appliesTo = new { profile.ProfileId, profile.SourceOrdinal, profile.Name, profile.ProfileFingerprint },
-            run = new { report.RunId, report.StartedAt, report.CompletedAt, report.DurationMs, report.TestType, report.ExtendedTest, report.NetworkLabel, report.TestContext },
+            run = new { report.RunId, report.StartedAt, report.CompletedAt, report.DurationMs, report.TestType, report.ExtendedTest, report.NetworkLabel, report.TestContext, outcome = report.Outcome },
             environment = report.Environment,
             node = report.Node,
             publicIpObservations = report.DirectBaseline,
@@ -224,7 +232,9 @@ internal static class ResultPackageBuilder
             Alternatives("CGNAT", node.Nat.CgnatHint ? "medium" : "low", "Carrier-grade address space in visible early hops is a positive hint; its absence does not exclude provider-side translation.", (node.Nat.CgnatHint ? "CGNAT likely" : "CGNAT not observed", node.Nat.CgnatHint ? 80 : 75), (node.Nat.CgnatHint ? "other private routing" : "CGNAT present but hidden", node.Nat.CgnatHint ? 20 : 25)),
             Alternatives("Multiple NAT layers", node.Nat.MultipleNatLayersHint ? "medium" : "low", "Multiple distinct private hops can indicate double NAT, but routed private ISP infrastructure is an alternative.", (node.Nat.MultipleNatLayersHint ? "multiple translation/private routing layers likely" : "not observed", node.Nat.MultipleNatLayersHint ? 75 : 70), (node.Nat.MultipleNatLayersHint ? "single NAT plus routed private hops" : "hidden multiple NAT", node.Nat.MultipleNatLayersHint ? 25 : 30)),
             Pair("Observed provider/prefix holder", node.Provider.DisplayName ?? "unknown", providerProbability, node.Provider.Confidence, node.Provider.Limitation ?? "BGP/RDAP attribution."),
-            Pair("Public-IP country", node.Geolocation.Country ?? "unknown", node.Geolocation.Country is null ? 25 : geoProbability, node.Geolocation.Confidence, node.Geolocation.Limitation ?? "IP geolocation only.")
+            Pair("Public-IP country", node.Geolocation.Country ?? "unknown", node.Geolocation.Country is null ? 25 : geoProbability, node.Geolocation.Confidence, node.Geolocation.Limitation ?? "IP geolocation only."),
+            Pair("Device location", node.DeviceLocation.Status == "observed" ? $"{node.DeviceLocation.Latitude},{node.DeviceLocation.Longitude}" : "unavailable", node.DeviceLocation.Status == "observed" ? 95 : 10, node.DeviceLocation.Confidence, node.DeviceLocation.Limitation ?? "Operating-system or user-supplied device location."),
+            Pair("Device/IP geo agreement", node.GeolocationComparison.Status, node.GeolocationComparison.Status == "consistent" ? 85 : node.GeolocationComparison.Status == "coarsely-consistent" ? 65 : node.GeolocationComparison.Status == "divergent" ? 90 : 20, node.DeviceLocation.Status == "observed" ? "medium" : "unknown", node.GeolocationComparison.Interpretation ?? "Both sources are required.")
         };
         if (node.Gateway.ModelLabel is not null)
             results.Add(Alternatives("Gateway model", "medium", "UPnP/SSDP metadata is self-advertised and not cryptographically verified.", ($"advertised model: {node.Gateway.ModelLabel}", 90), ("misidentified/spoofed metadata", 10)));
@@ -277,10 +287,14 @@ internal static class ResultPackageBuilder
         builder.AppendLine($"Source line: {(profile.SourceLine?.ToString() ?? "stdin/not applicable")}");
         builder.AppendLine($"Name: {profile.Name}");
         builder.AppendLine($"Sanitized fingerprint: {profile.ProfileFingerprint}");
+        builder.AppendLine("Fingerprint algorithm: sha256-canonical-v2-truncated-16");
         builder.AppendLine($"Declared transport: {profile.Declared.Protocol}/{profile.Declared.Security}/{profile.Declared.Network}");
         builder.AppendLine($"Endpoint: {profile.Declared.Host}:{profile.Declared.Port}");
         builder.AppendLine($"Observed endpoint IPs: {string.Join(", ", profile.ObservedEndpointIps)}");
         builder.AppendLine($"Stage results: passed={passed}, partial={partial}, failed={failed}, skipped={skipped}").AppendLine();
+        builder.AppendLine($"Profile outcome: {profile.Outcome?.Outcome ?? OutcomeClassifier.Unknown}");
+        builder.AppendLine($"Outcome reason: {profile.Outcome?.ReasonCode ?? "INSUFFICIENT_EVIDENCE"} - {profile.Outcome?.Reason ?? "No causal classification was available."}");
+        builder.AppendLine($"Run outcome: {report.Outcome?.Outcome ?? OutcomeClassifier.Unknown} ({report.Outcome?.ReasonCode ?? "RUN_INCONCLUSIVE"})").AppendLine();
         builder.AppendLine("FILES");
         builder.AppendLine("-----");
         builder.AppendLine("connection.json    Connection characteristics, standard stages, endpoint/exit attribution and probability assessments.");
@@ -300,6 +314,7 @@ internal static class ResultPackageBuilder
         builder.AppendLine("------------------");
         builder.AppendLine("Raw connection URI, UUID, REALITY public key/password and short ID are not included.");
         builder.AppendLine("Local/public addresses and network metadata requested by the test are included and may be sensitive.");
+        builder.AppendLine("When available or explicitly supplied, device coordinates, accuracy and capture time are included and are sensitive location data.");
         builder.AppendLine("The archive excludes executables, packet captures, SQLite history and downloaded/uploaded test payloads.");
         foreach (var limitation in report.Limitations) builder.AppendLine("- " + limitation);
         return builder.ToString();

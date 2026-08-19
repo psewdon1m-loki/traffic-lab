@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.2.2.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.3.0.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -236,7 +236,7 @@ app-side loopback broken-pipe/reset cleanup as expected rather than degrading
 an otherwise successful run. Its bounded speed probe now uses one calibration
 plus three adaptive measurement samples, median and variability/confidence reporting, and separates payload
 rate from connection/TLS/TTFB-inclusive effective rate.
-Android release 3.2.2 shows a persistent `Result export` card in the main screen
+Android release 3.3.0 shows a persistent `Result export` card in the main screen
 only after the ZIP is ready. Save/Share can be used repeatedly; the card and
 temporary archive remain available until a new test starts or connections are
 cleared.
@@ -308,6 +308,21 @@ files. Folder names are derived from URI display names, stripped of unsafe path
 characters and made unique. Duplicate endpoints and credentials-independent
 fingerprints remain separate profile instances.
 
+Starting with 3.3.0, `status` remains for compatibility, but every stage also
+contains `outcome`, `reasonCode`, and a human-readable reason. Every profile and
+the complete run receive the same causal result contract:
+
+- `PASS` — authenticated end-to-end traffic was observed;
+- `UNDERLAY_FAIL` — the no-proxy direct control was unavailable;
+- `PROXY_FAIL / PROXY_PATH_FAIL` — direct control worked but endpoint TCP did not;
+- `PROXY_FAIL / PROTOCOL_AUTH_FAIL` — endpoint TCP worked but authenticated traffic did not;
+- `TEST_FAILURE` — URI parsing, policy, generated configuration, or local core failed;
+- `UNKNOWN` — skipped, unsupported, partial, or insufficient evidence.
+
+The canonical v2 profile fingerprint uses the same normalized non-secret fields
+on desktop/Linux and Android, so matching connections can be correlated across
+platforms even when application version numbers differ.
+
 Probabilities are explicitly marked as conservative heuristic evidence weights,
 not calibrated statistical probabilities. Exact observations, qualitative
 confidence, competing alternatives, basis and server-side limitations are all
@@ -372,6 +387,9 @@ Every run and `snapshot` now records the no-proxy side of the test node:
 - detected/declared Ethernet, Wi-Fi, WWAN/cellular, PPP or tethering access;
 - bounded no-proxy latency, 2 MiB download and 512 KiB upload samples;
 - public-prefix ASN/provider, reverse DNS and low-confidence IP geolocation;
+- device coordinates from a user-supplied test plan, Windows Location API,
+  Android Location API, or an available Linux GeoClue client, always stored as a
+  separate sensitive source with accuracy/age and compared with IP geolocation;
 - direct STUN mapping, local/private/global address comparison, private and
   CGNAT traceroute hops, and conservative multi-NAT hints;
 - gateway RTT, hashed MAC identity/OUI and manufacturer/model when the gateway

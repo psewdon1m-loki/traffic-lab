@@ -67,7 +67,7 @@ actual="$(sha256sum "$ARCHIVE" | awk '{print tolower($1)}')"
 echo 'Release SHA-256 verified.'
 
 if (( INSTALL_PACKAGES )) && command -v apt-get >/dev/null 2>&1; then
-  packages=(ca-certificates libicu-dev libnuma1)
+  packages=(ca-certificates libnuma1)
   command -v ip >/dev/null 2>&1 && command -v ss >/dev/null 2>&1 || packages+=(iproute2)
   command -v ping >/dev/null 2>&1 || packages+=(iputils-ping)
   command -v traceroute >/dev/null 2>&1 || packages+=(traceroute)

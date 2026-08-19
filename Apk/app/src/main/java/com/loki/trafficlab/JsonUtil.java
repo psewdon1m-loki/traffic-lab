@@ -38,6 +38,19 @@ final class JsonUtil {
         put(stage, "elapsedMs", elapsedMs);
         put(stage, "data", data);
         put(stage, "error", error);
+        if ("passed".equals(status)) {
+            put(stage, "outcome", "PASS");
+            put(stage, "reasonCode", "CHECK_SUCCEEDED");
+            put(stage, "reason", "The stage success criterion was directly observed.");
+        } else if ("skipped".equals(status)) {
+            put(stage, "outcome", "UNKNOWN");
+            put(stage, "reasonCode", "NOT_REQUESTED_OR_NOT_APPLICABLE");
+            put(stage, "reason", error == null ? "The stage was not executed." : error);
+        } else {
+            put(stage, "outcome", "UNKNOWN");
+            put(stage, "reasonCode", "NOT_CLASSIFIED");
+            put(stage, "reason", error == null ? "The stage did not provide a conclusive causal result." : error);
+        }
         return stage;
     }
 
@@ -45,6 +58,11 @@ final class JsonUtil {
     static JSONObject failed(String name, long elapsedMs, String error, Object data) { return stage(name, "failed", elapsedMs, data, error); }
     static JSONObject partial(String name, long elapsedMs, String error, Object data) { return stage(name, "partial", elapsedMs, data, error); }
     static JSONObject skipped(String name, String reason) { return stage(name, "skipped", 0, null, reason); }
+    static JSONObject unsupported(String name, String reason, Object data) {
+        JSONObject value = stage(name, "skipped", 0, data, reason);
+        put(value, "reasonCode", "UNSUPPORTED_ON_PLATFORM");
+        return value;
+    }
 
     static String readUtf8(InputStream input, int maxBytes) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();

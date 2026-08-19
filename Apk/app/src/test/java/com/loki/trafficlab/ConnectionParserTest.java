@@ -31,4 +31,8 @@ public class ConnectionParserTest {
         assertEquals(1, links.size());
         assertTrue(links.get(0).endsWith("#secure%20sh"));
     }
+
+    @Test public void canonicalFingerprintMatchesDesktopV2Contract() throws Exception {
+        assertEquals("f1568b5341baaddf", ConnectionParser.parse(FIRST).fingerprint());
+    }
 }

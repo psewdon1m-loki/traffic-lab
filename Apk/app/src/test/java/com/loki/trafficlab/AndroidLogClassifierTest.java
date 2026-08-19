@@ -41,6 +41,15 @@ public class AndroidLogClassifierTest {
         assertEquals(1, analysis.getInt("unexpectedMarkerCount"));
     }
 
+    @Test public void classifiesNormalCloseDeprecationAndQuicPolicyAsBenign() throws Exception {
+        JSONObject stage = AndroidLogClassifier.stage(logs(
+                "2026/08/17 14:42:27 [Error] websocket: close 1000 (normal)\n"
+                        + "2026/08/17 14:42:28 [Warning] gRPC legacy transport is deprecated\n"
+                        + "2026/08/17 14:42:29 [Error] XTLS rejected UDP/443 traffic"));
+        assertEquals("passed", stage.getString("status"));
+        assertEquals(3, stage.getJSONObject("data").getJSONObject("logAnalysis").getInt("benignMarkerCount"));
+    }
+
     private static JSONObject logs(String errorTail) {
         return JsonUtil.object("accessTail", "", "errorTail", errorTail, "stdoutTail", "", "stderrTail", "", "credentialsRedacted", true);
     }

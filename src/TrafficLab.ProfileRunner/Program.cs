@@ -169,7 +169,7 @@ internal static partial class Program
             Tool = new ToolInfo
             {
                 Name = "Loki Traffic Lab Profile Runner",
-                Version = "3.2.2",
+                Version = "3.3.0",
                 XrayPath = Path.GetFileName(options.XrayPath),
                 XrayVersion = await ReadXrayVersionAsync(options.XrayPath, cancellationToken),
                 TimeoutSeconds = options.TimeoutSeconds,
@@ -212,6 +212,12 @@ internal static partial class Program
             report.DirectAttribution.Add(await GetIpAttributionAsync(directIp, options.Timeout, cancellationToken));
         }
         report.Node = await NodeDiagnostics.CaptureAsync(report.Environment, report.DirectBaseline, report.DirectAttribution, report.TestContext, options.Timeout).WaitAsync(cancellationToken);
+        if (!report.TestContext.Latitude.HasValue && report.Node.DeviceLocation.Status == "observed")
+        {
+            report.TestContext.Latitude = report.Node.DeviceLocation.Latitude;
+            report.TestContext.Longitude = report.Node.DeviceLocation.Longitude;
+            report.TestContext.LocationSource = report.Node.DeviceLocation.Source;
+        }
         ReportRunProgress(15, 0, "Direct-network baseline captured");
 
         for (var index = 0; index < input.Uris.Count && index < options.MaxProfiles; index++)
@@ -280,6 +286,7 @@ internal static partial class Program
         cancellationToken.ThrowIfCancellationRequested();
         ReportRunProgress(95, scheduledConnections, "Building structured reports");
         report.HostnameGroups = BuildHostnameGroups(report.Profiles);
+        OutcomeClassifier.Apply(report);
         report.OsiMap = NodeDiagnostics.BuildOsiMap(report);
         report.CompletedAt = DateTimeOffset.UtcNow;
         report.DurationMs = (long)(report.CompletedAt.Value - report.StartedAt).TotalMilliseconds;
@@ -331,8 +338,11 @@ internal static partial class Program
 
         PrintSummary(report, jsonPath, csvPath, osiPath, report.ResultPackage.ZipPath);
         progress?.Invoke("ZIP : " + Path.GetFullPath(report.ResultPackage.ZipPath));
-        var exitCode = report.Profiles.Any(profile => profile.Stages.Any(stage => stage.Stage == "tunnel.http" && stage.Status == "passed")) ? 0 : 1;
-        ReportRunProgress(100, scheduledConnections, exitCode == 0 ? "Testing completed successfully" : "Testing completed with no usable profile", exitCode == 0 ? "completed" : "completed-with-errors", Path.GetFullPath(report.ResultPackage.ZipPath));
+        var passedProfiles = report.Profiles.Count(profile => profile.Outcome?.Outcome == OutcomeClassifier.Pass);
+        var failedProfiles = report.Profiles.Count - passedProfiles;
+        var exitCode = passedProfiles > 0 ? 0 : 1;
+        var finalMessage = $"Testing completed: {passedProfiles} usable, {failedProfiles} degraded/failed; outcome={report.Outcome?.Outcome ?? OutcomeClassifier.Unknown}";
+        ReportRunProgress(100, scheduledConnections, finalMessage, exitCode == 0 ? "completed" : "completed-with-errors", Path.GetFullPath(report.ResultPackage.ZipPath));
         return exitCode;
     }
 
@@ -411,6 +421,7 @@ internal static partial class Program
             tcpResults.Sum(item => item.ElapsedMs),
             tcpResults,
             tcpResults.Any(item => item.Connected) ? null : tcpResults.Count == 0 ? "No endpoint IP addresses were available." : "No endpoint TCP connection succeeded."));
+        var endpointTcpAvailable = tcpResults.Any(item => item.Connected);
         if (options.EnableExtendedTests && endpointAddresses.Length > 0)
         {
             report.Stages.Add(await ExtendedDiagnostics.ProbeTcpSeriesAsync(endpointAddresses[0], profile.Port, options.TcpAttempts, options.Timeout).WaitAsync(cancellationToken));
@@ -462,7 +473,7 @@ internal static partial class Program
         profileProgress?.Invoke(40, "attribution and path checks completed");
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (endpointAddresses.Length > 0 && !string.IsNullOrWhiteSpace(profile.Sni)
+        if (endpointTcpAvailable && endpointAddresses.Length > 0 && !string.IsNullOrWhiteSpace(profile.Sni)
             && profile.Security is "reality" or "tls")
         {
             report.Stages.Add(await ProbeTlsAsync(endpointAddresses[0], profile.Port, profile.Sni, options.Timeout).WaitAsync(cancellationToken));
@@ -473,8 +484,10 @@ internal static partial class Program
         }
         else
         {
-            report.Stages.Add(StageResult.Skipped("endpoint.tlsFallback", "Profile does not declare TLS/REALITY with SNI, or endpoint IP is unavailable."));
-            report.Stages.Add(StageResult.Skipped("endpoint.tlsMatrix", "TLS variation matrix is not applicable without a TLS/REALITY SNI and endpoint IP."));
+            var reason = !endpointTcpAvailable ? "Endpoint TCP prerequisite failed."
+                : "Profile does not declare TLS/REALITY with SNI, or endpoint IP is unavailable.";
+            report.Stages.Add(StageResult.Skipped("endpoint.tlsFallback", reason));
+            report.Stages.Add(StageResult.Skipped("endpoint.tlsMatrix", reason));
         }
 
         report.Stages.Add(StageResult.Passed("profile.packetEncoding", 0, new
@@ -485,38 +498,45 @@ internal static partial class Program
             interpretation = "A declared packetEncoding proves client configuration. Runtime UDP and an explicit A/B XUDP probe are needed to demonstrate server compatibility."
         }));
 
-        if (profile.Network == "ws" && endpointAddresses.Length > 0)
+        if (endpointTcpAvailable && profile.Network == "ws" && endpointAddresses.Length > 0)
         {
             report.Stages.Add(await ProbeWebSocketUpgradeAsync(profile, endpointAddresses[0], options.Timeout).WaitAsync(cancellationToken));
         }
         else
         {
-            report.Stages.Add(StageResult.Skipped("endpoint.websocketUpgrade", "Profile transport is not WebSocket."));
+            report.Stages.Add(StageResult.Skipped("endpoint.websocketUpgrade", profile.Network != "ws" ? "Profile transport is not WebSocket." : "Endpoint TCP prerequisite failed."));
         }
         profileProgress?.Invoke(48, "TLS and transport presentation checked");
         cancellationToken.ThrowIfCancellationRequested();
 
-        var runtimeResult = await ProbeTunnelAsync(profile, report, directBaseline, options, profileProgress, cancellationToken);
+        var runtimeResult = endpointTcpAvailable
+            ? await ProbeTunnelAsync(profile, report, directBaseline, options, profileProgress, cancellationToken)
+            : BuildSkippedTunnelResult("Endpoint TCP was unreachable; downstream authentication, performance, stability and UDP probes were not attempted.", options);
         report.Stages.AddRange(runtimeResult.Stages);
         report.ObservedSocketIps.AddRange(runtimeResult.ObservedRemoteIps);
         profileProgress?.Invoke(92, "tunnel tests completed");
 
-        if (options.EnableNegativeControls)
+        var authenticated = runtimeResult.Stages.Any(item => item.Stage == "tunnel.authenticatedEndToEnd" && item.Status == "passed");
+        if (options.EnableNegativeControls && authenticated)
         {
             report.Stages.Add(await ProbeNegativeControlsAsync(profile, options, cancellationToken));
         }
         else
         {
-            report.Stages.Add(StageResult.Skipped("tunnel.negativeControls", "Disabled by test plan; enable explicitly because controls create several intentionally rejected authentication attempts."));
+            report.Stages.Add(StageResult.Skipped("tunnel.negativeControls", authenticated
+                ? "Disabled by test plan; enable explicitly because controls create several intentionally rejected authentication attempts."
+                : "Authenticated baseline did not succeed; negative authentication controls would not be interpretable."));
         }
         profileProgress?.Invoke(96, "negative controls completed");
-        if (options.EnableXudpCompatibility)
+        if (options.EnableXudpCompatibility && authenticated)
         {
             report.Stages.Add(await ProbeXudpCompatibilityAsync(profile, options, cancellationToken));
         }
         else
         {
-            report.Stages.Add(StageResult.Skipped("tunnel.xudpCompatibility", "Disabled by test plan; use --xudp or enableXudpCompatibility to run an explicit A/B client configuration."));
+            report.Stages.Add(StageResult.Skipped("tunnel.xudpCompatibility", authenticated
+                ? "Disabled by test plan; use --xudp or enableXudpCompatibility to run an explicit A/B client configuration."
+                : "Authenticated baseline did not succeed; an XUDP compatibility result would not be attributable."));
         }
         profileProgress?.Invoke(98, "XUDP compatibility completed");
         report.Stages.Add(ExtendedDiagnostics.BuildInfrastructureSignals(report));
@@ -656,10 +676,11 @@ internal static partial class Program
                 httpObservations.Sum(item => item.ElapsedMs),
                 httpObservations,
                 successfulHttp is not null ? null : "No functional HTTP target succeeded through the tunnel."));
+            var authenticated = successfulHttp is not null || result.ExitIps.Any(item => item.Valid);
             result.Stages.Add(StageResult.FromStatus(
                 "tunnel.authenticatedEndToEnd",
-                successfulHttp is not null ? "passed" : "failed",
-                successfulHttp?.ElapsedMs ?? 0,
+                authenticated ? "passed" : "failed",
+                successfulHttp?.ElapsedMs ?? result.ExitIps.Sum(item => item.ElapsedMs),
                 new
                 {
                     protocol = profile.Protocol,
@@ -669,8 +690,14 @@ internal static partial class Program
                     firstSuccessfulStatus = successfulHttp?.StatusCode,
                     interpretation = "A successful destination request proves that the supplied profile completed the client core, transport security, VLESS authentication, and server outbound path as a whole."
                 },
-                successfulHttp is not null ? null : "The authenticated profile did not complete a functional destination request."));
+                authenticated ? null : "The authenticated profile did not complete a functional destination request."));
             profileProgress?.Invoke(72, "authenticated HTTP and exit IP checked");
+
+            if (!authenticated)
+            {
+                AddSkippedTunnelStages(result, "Authenticated end-to-end traffic failed; downstream performance, stability and UDP checks were skipped to avoid repeated timeouts.", options);
+                return result;
+            }
 
             result.Stages.Add(await ProbeSocksDomainAsync(socksPort, options.Timeout).WaitAsync(cancellationToken));
             result.Stages.Add(await ProbeDownloadAsync(proxyHttp, options.Timeout, cancellationToken));
@@ -764,6 +791,38 @@ internal static partial class Program
         }
 
         return result;
+    }
+
+    private static TunnelProbeResult BuildSkippedTunnelResult(string reason, RunnerOptions options)
+    {
+        var result = new TunnelProbeResult();
+        result.Stages.Add(StageResult.Skipped("tunnel.coreValidation", reason));
+        result.Stages.Add(StageResult.Skipped("tunnel.coreStart", reason));
+        result.Stages.Add(StageResult.Skipped("client.captureScope", reason));
+        result.Stages.Add(StageResult.Skipped("tunnel.exitIp", reason));
+        result.Stages.Add(StageResult.Skipped("tunnel.addressFamilies", reason));
+        result.Stages.Add(StageResult.Skipped("tunnel.http", reason));
+        result.Stages.Add(StageResult.Skipped("tunnel.authenticatedEndToEnd", reason));
+        AddSkippedTunnelStages(result, reason, options);
+        result.Stages.Add(StageResult.Skipped("tunnel.logs", "The isolated core was not started because a prerequisite failed."));
+        return result;
+    }
+
+    private static void AddSkippedTunnelStages(TunnelProbeResult result, string reason, RunnerOptions options)
+    {
+        var names = new List<string>
+        {
+            "tunnel.dnsViaSocks", "tunnel.download", "tunnel.controlledCanary", "tunnel.stability", "tunnel.udp"
+        };
+        if (options.EnableExtendedTests)
+            names.AddRange(["tunnel.httpProtocols", "tunnel.payloadMatrix", "tunnel.upload", "tunnel.stun", "tunnel.quicHandshake"]);
+        if (options.IsExtendedTest)
+            names.AddRange(["tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp", "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.networkInterruption"]);
+        else
+            names.Add("tunnel.extendedSuite");
+        foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
+            if (!result.Stages.Any(item => item.Stage.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                result.Stages.Add(StageResult.Skipped(name, reason));
     }
 
     private static async Task<StageResult> ProbeNegativeControlsAsync(ConnectionProfile profile, RunnerOptions options, CancellationToken cancellationToken)
@@ -2258,7 +2317,11 @@ internal static partial class Program
         => line.Contains("use of closed network connection", StringComparison.OrdinalIgnoreCase)
             || line.Contains("read/write on closed pipe", StringComparison.OrdinalIgnoreCase)
             || line.Contains("failed to read http request > EOF", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("connection ends > EOF", StringComparison.OrdinalIgnoreCase);
+            || line.Contains("connection ends > EOF", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("websocket: close 1000", StringComparison.OrdinalIgnoreCase)
+            || Regex.IsMatch(line, @"(?:wsasend|send|write) tcp 127\.0\.0\.1:\d+->127\.0\.0\.1:\d+:.*(?:aborted by the software|operation.*aborted|broken pipe|connection reset)", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(line, @"(?:websocket|grpc).*(?:deprecated|legacy transport)", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(line, @"XTLS.*rejected UDP/443 traffic", RegexOptions.IgnoreCase);
 
     private static bool CoreLogLineFallsInside(string line, ExpectedFailureWindow window)
     {
@@ -2538,10 +2601,10 @@ internal static partial class Program
     {
         static string Csv(string? value) => "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
         await using var writer = new StreamWriter(path, false, new UTF8Encoding(false), 64 * 1024);
-        await writer.WriteLineAsync("profileId,profileName,stage,status,elapsedMs,error,data");
+        await writer.WriteLineAsync("profileId,profileName,stage,status,outcome,reasonCode,elapsedMs,error,reason,data");
         async Task AppendRowAsync(string profileId, string name, string stage, string status, object data)
         {
-            await writer.WriteLineAsync(string.Join(',', Csv(profileId), Csv(name), Csv(stage), Csv(status), "0", "", Csv(JsonSerializer.Serialize(data, new JsonSerializerOptions(JsonSerializerDefaults.Web)))));
+            await writer.WriteLineAsync(string.Join(',', Csv(profileId), Csv(name), Csv(stage), Csv(status), Csv(OutcomeClassifier.Unknown), Csv("NODE_OBSERVATION"), "0", "", "", Csv(JsonSerializer.Serialize(data, new JsonSerializerOptions(JsonSerializerDefaults.Web)))));
         }
         await AppendRowAsync("run", report.TestContext.NodeId, "run.metadata", "observed", new { report.RunId, report.TestType, report.ExtendedTest, report.StartedAt, report.CompletedAt, report.DurationMs });
         if (report.Node is not null)
@@ -2558,7 +2621,7 @@ internal static partial class Program
             foreach (var stage in profile.Stages)
             {
                 var compactData = stage.Data is null ? "" : JsonSerializer.Serialize(stage.Data, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-                await writer.WriteLineAsync(string.Join(',', Csv(profile.ProfileId), Csv(profile.Name), Csv(stage.Stage), Csv(stage.Status), stage.ElapsedMs.ToString(CultureInfo.InvariantCulture), Csv(stage.Error), Csv(compactData)));
+                await writer.WriteLineAsync(string.Join(',', Csv(profile.ProfileId), Csv(profile.Name), Csv(stage.Stage), Csv(stage.Status), Csv(stage.Outcome), Csv(stage.ReasonCode), stage.ElapsedMs.ToString(CultureInfo.InvariantCulture), Csv(stage.Error), Csv(stage.Reason), Csv(compactData)));
             }
         }
     }
@@ -2577,6 +2640,7 @@ internal static partial class Program
             Console.WriteLine($"  Public IP: {string.Join(", ", report.Node.PublicAddresses)}");
             Console.WriteLine($"  Provider : {report.Node.Provider.DisplayName ?? "unknown"} {string.Join(", ", report.Node.Provider.Asns.Select(value => "AS" + value))}");
             Console.WriteLine($"  Geo hint : {report.Node.Geolocation.Country ?? "unknown"} ({report.Node.Geolocation.Confidence}, radius {report.Node.Geolocation.EstimatedRadiusKm?.ToString(CultureInfo.InvariantCulture) ?? "?"} km)");
+            Console.WriteLine($"  Device geo: {report.Node.DeviceLocation.Status} {report.Node.DeviceLocation.Latitude?.ToString(CultureInfo.InvariantCulture) ?? "?"},{report.Node.DeviceLocation.Longitude?.ToString(CultureInfo.InvariantCulture) ?? "?"} accuracy={report.Node.DeviceLocation.AccuracyMeters?.ToString(CultureInfo.InvariantCulture) ?? "?"}m; IP distance={report.Node.GeolocationComparison.DistanceKm?.ToString(CultureInfo.InvariantCulture) ?? "?"}km");
             Console.WriteLine($"  Direct   : latency p50={report.Node.DirectPerformance.LatencyP50Ms?.ToString(CultureInfo.InvariantCulture) ?? "?"} ms, down effective/payload={report.Node.DirectPerformance.Download.EffectiveMegabitsPerSecond?.ToString(CultureInfo.InvariantCulture) ?? "?"}/{report.Node.DirectPerformance.Download.PayloadTransferMegabitsPerSecond?.ToString(CultureInfo.InvariantCulture) ?? "?"} Mbps, up effective={report.Node.DirectPerformance.Upload.EffectiveMegabitsPerSecond?.ToString(CultureInfo.InvariantCulture) ?? "?"} Mbps");
             Console.WriteLine($"  NAT      : {report.Node.Nat.Presence} ({report.Node.Nat.Confidence}), CGNAT hint={report.Node.Nat.CgnatHint}");
             Console.WriteLine($"  Gateway  : {report.Node.Gateway.Address ?? "unknown"} {report.Node.Gateway.ModelLabel ?? "model not advertised"}");
@@ -2584,21 +2648,23 @@ internal static partial class Program
         }
         Console.WriteLine("Loki Traffic Lab profile summary");
         Console.WriteLine(new string('-', 104));
-        Console.WriteLine($"{"PROFILE",-12} {"STAGE",-32} {"STATUS",-9} {"MS",8}  DETAILS");
+        Console.WriteLine($"{"PROFILE",-12} {"STAGE",-30} {"STATUS",-8} {"OUTCOME",-14} {"MS",8}  DETAILS");
         Console.WriteLine(new string('-', 104));
         foreach (var profile in report.Profiles)
         {
             foreach (var stage in profile.Stages)
             {
                 var detail = stage.Error ?? SummarizeStage(stage);
-                Console.WriteLine($"{profile.ProfileId,-12} {stage.Stage,-32} {stage.Status,-9} {stage.ElapsedMs,8}  {Truncate(detail, 42)}");
+                Console.WriteLine($"{profile.ProfileId,-12} {stage.Stage,-30} {stage.Status,-8} {stage.Outcome,-14} {stage.ElapsedMs,8}  {Truncate(stage.ReasonCode + ": " + detail, 54)}");
             }
             foreach (var inference in profile.Inferences.Where(item => item.Key is "profileUsable" or "ingressAndEgressDiffer" or "udpEndToEnd" or "secondHop"))
             {
-                Console.WriteLine($"{profile.ProfileId,-12} {"inference." + inference.Key,-32} {inference.Value,-9} {"",8}  confidence={inference.Confidence}");
+                Console.WriteLine($"{profile.ProfileId,-12} {"inference." + inference.Key,-30} {inference.Value,-8} {"",-14} {"",8}  confidence={inference.Confidence}");
             }
+            Console.WriteLine($"{profile.ProfileId,-12} {"profile.outcome",-30} {profile.Outcome?.Outcome ?? OutcomeClassifier.Unknown,-8} {profile.Outcome?.ReasonCode ?? "RUN_INCONCLUSIVE",-14} {"",8}  {Truncate(profile.Outcome?.Reason ?? "No causal classification.", 54)}");
         }
         Console.WriteLine(new string('-', 104));
+        Console.WriteLine($"Run outcome: {report.Outcome?.Outcome ?? OutcomeClassifier.Unknown} / {report.Outcome?.ReasonCode ?? "RUN_INCONCLUSIVE"} - {report.Outcome?.Reason}");
         Console.WriteLine("JSON: " + Path.GetFullPath(jsonPath));
         Console.WriteLine("CSV : " + Path.GetFullPath(csvPath));
         Console.WriteLine("OSI : " + Path.GetFullPath(osiPath));
@@ -2711,8 +2777,16 @@ internal static partial class Program
         Assert(Redact(sample) == "<redacted-uri>", "URI redaction failed.");
         var fingerprint = ExtendedDiagnostics.ComputeProfileFingerprint(parsed.ToDeclaredProfile());
         Assert(fingerprint.Length == 16, "Sanitized profile fingerprint has the wrong length.");
+        Assert(fingerprint == "dc782c09bba97c90", "Canonical cross-platform profile fingerprint v2 changed unexpectedly.");
+        var sharedFingerprintVector = ConnectionProfile.Parse("vless://11111111-2222-4333-8444-555555555555@192.0.2.10:8021?encryption=none&security=reality&type=tcp&sni=example.com&fp=chrome&pbk=test&sid=abcd#secure%20sh");
+        Assert(ExtendedDiagnostics.ComputeProfileFingerprint(sharedFingerprintVector.ToDeclaredProfile()) == "f1568b5341baaddf", "Desktop fingerprint does not match the shared Android v2 test vector.");
         var anotherCredential = ConnectionProfile.Parse(sample.Replace("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", StringComparison.Ordinal));
         Assert(fingerprint == ExtendedDiagnostics.ComputeProfileFingerprint(anotherCredential.ToDeclaredProfile()), "Profile fingerprint must not depend on UUID.");
+        var pathFailureProfile = new ProfileReport { ProfileId = "profile-path", Name = "path", Declared = parsed.ToDeclaredProfile(), Stages = [StageResult.Passed("profile.parse", 0), StageResult.Passed("endpoint.dns", 1), StageResult.Failed("endpoint.tcp", 1, "timeout")] };
+        Assert(OutcomeClassifier.ClassifyProfile(pathFailureProfile, true).ReasonCode == "PROXY_PATH_FAIL", "Endpoint TCP failure outcome classification is incorrect.");
+        var authFailureProfile = new ProfileReport { ProfileId = "profile-auth", Name = "auth", Declared = parsed.ToDeclaredProfile(), Stages = [StageResult.Passed("profile.parse", 0), StageResult.Passed("endpoint.dns", 1), StageResult.Passed("endpoint.tcp", 1), StageResult.Failed("tunnel.authenticatedEndToEnd", 1, "auth failed")] };
+        Assert(OutcomeClassifier.ClassifyProfile(authFailureProfile, true).ReasonCode == "PROTOCOL_AUTH_FAIL", "Authenticated protocol failure outcome classification is incorrect.");
+        Assert(OutcomeClassifier.ClassifyProfile(authFailureProfile, false).Outcome == OutcomeClassifier.UnderlayFail, "Direct-control failure must take precedence over proxy classification.");
         var xudp = ConnectionProfile.Parse(sample.Replace("#Sample", "&packetEncoding=xudp#Sample", StringComparison.Ordinal));
         Assert(xudp.PacketEncoding == "xudp", "packetEncoding parsing failed.");
         var dnsRound = new DnsProbeResult { Host = "example.com", Observations = { new DnsObservation("test", "A", "192.0.2.1", 60, 1, "success", null) } };
@@ -2784,7 +2858,7 @@ internal static partial class Program
             ExtendedTest = new ExtendedTestMetadata { Enabled = true, Elevated = false, SoakDurationSeconds = 300, ParallelFlows = 20, NetworkLossSeconds = 5 },
             NetworkLabel = "self-test",
             TestContext = new TestContext { NodeId = "self-test-pc" },
-            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.2.2", XrayPath = "xray.exe", XrayVersion = "self-test" },
+            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.3.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
             Input = new InputSummary { LoadedConnections = 1, ScheduledConnections = 1 },
             Environment = new NetworkEnvironment()
         };
@@ -2840,12 +2914,15 @@ internal static partial class Program
             var inducedLine = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Info] app/proxyman/outbound: failed to process outbound traffic > failed to find an available destination > connectex: forbidden by its access permissions";
             var benignLine = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Info] transport/internet/udp: failed to handle UDP input > io: read/write on closed pipe";
             var errorPath = Path.Combine(logClassifierRoot, "error.log");
-            File.WriteAllLines(errorPath, [inducedLine, benignLine]);
+            var normalWebSocketClose = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Error] websocket: close 1000 (normal)";
+            var deprecatedTransport = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Warning] WebSocket transport is deprecated";
+            var quicPolicy = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Error] XTLS rejected UDP/443 traffic";
+            File.WriteAllLines(errorPath, [inducedLine, benignLine, normalWebSocketClose, deprecatedTransport, quicPolicy]);
             var classifiedLogs = BuildCoreLogStage(Path.Combine(logClassifierRoot, "access.log"), errorPath, "", "", [expectedWindow]);
             var classifiedData = JsonSerializer.SerializeToElement(classifiedLogs.Data, JsonOptions);
             Assert(classifiedLogs.Status == "passed", "An induced firewall failure incorrectly downgraded tunnel.logs.");
             Assert(classifiedData.GetProperty("classificationSummary").GetProperty("expectedOrInduced").GetInt32() == 1
-                && classifiedData.GetProperty("classificationSummary").GetProperty("benignLifecycle").GetInt32() == 1
+                && classifiedData.GetProperty("classificationSummary").GetProperty("benignLifecycle").GetInt32() == 4
                 && classifiedData.GetProperty("classificationSummary").GetProperty("unexpected").GetInt32() == 0,
                 "Core-log expected/benign/unexpected classification is incorrect.");
             var unexpectedLine = expectedAt.AddMinutes(1).ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Error] failed to dial: connection refused";
@@ -3123,7 +3200,8 @@ internal sealed class RunnerInput
         Provider = Provider,
         RestrictionState = string.IsNullOrWhiteSpace(RestrictionState) ? "unknown" : RestrictionState,
         Latitude = Latitude,
-        Longitude = Longitude
+        Longitude = Longitude,
+        LocationSource = Latitude.HasValue && Longitude.HasValue ? "test-context/user-supplied" : null
     };
 }
 
@@ -3298,6 +3376,7 @@ internal sealed class RunReport
     public List<HostnameGroup> HostnameGroups { get; set; } = [];
     public OsiTrafficMap? OsiMap { get; set; }
     public ResultPackageInfo? ResultPackage { get; set; }
+    public OutcomeDecision? Outcome { get; set; }
     public List<string> Limitations { get; init; } = [];
 }
 
@@ -3324,6 +3403,7 @@ internal sealed class ProfileReport
     public List<IpAttribution> ExitAttribution { get; init; } = [];
     public List<StageResult> Stages { get; init; } = [];
     public List<Inference> Inferences { get; init; } = [];
+    public OutcomeDecision? Outcome { get; set; }
 }
 
 internal sealed class DeclaredProfile
@@ -3354,6 +3434,9 @@ internal sealed class StageResult
     public long ElapsedMs { get; init; }
     public object? Data { get; init; }
     public string? Error { get; init; }
+    public string Outcome { get; set; } = OutcomeClassifier.Unknown;
+    public string ReasonCode { get; set; } = "NOT_CLASSIFIED";
+    public string? Reason { get; set; }
 
     public static StageResult Passed(string stage, long elapsedMs, object? data = null) => new() { Stage = stage, Status = "passed", ElapsedMs = elapsedMs, Data = data };
     public static StageResult Failed(string stage, long elapsedMs, string? error, object? data = null) => new() { Stage = stage, Status = "failed", ElapsedMs = elapsedMs, Error = error, Data = data };

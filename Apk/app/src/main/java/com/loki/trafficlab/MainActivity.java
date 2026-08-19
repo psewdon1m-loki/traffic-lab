@@ -250,7 +250,9 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     private void showResultExport(TrafficLabService.State state) {
         if (state == null || !state.completed() || latestZip == null || !latestZip.isFile()) { hideResultExport(); return; }
         String mode = state.testType.value.toUpperCase(Locale.ROOT);
-        resultExportSummary.setText(mode + " test completed successfully.\n"
+        resultExportSummary.setText(mode + " test completed.\n"
+                + "Outcome: " + state.outcome + "\n"
+                + "Reason: " + state.reasonCode + " - " + state.outcomeReason + "\n"
                 + "Connections tested: " + state.completed + "\n"
                 + "Duration: " + duration(state.durationMs) + "\n"
                 + "Archive: " + latestZip.getName() + "\n\n"
