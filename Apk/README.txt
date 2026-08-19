@@ -26,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.3.0.apk
+  Apk\releases\LokiTrafficLab-android-3.4.0.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -38,8 +38,11 @@ DEVICE WORKFLOW
 1. Copy one or several VLESS links as ordinary text.
 2. Tap `Paste links from clipboard`. The parser finds every vless:// occurrence,
    normalizes raw spaces in display names and preserves input order/duplicates.
-3. Tap `Start test` for the normal suite, or use the separate `Extended test`
+3. Tap `Start test` for the normal suite, use `Extended test`
    command for the normal suite plus long-running and process-disruptive checks.
+   `Speed test` runs only speed-relevant endpoint/authentication prerequisites
+   and direct/tunnel/direct download-upload matrices; it warns about potentially
+   substantial mobile-data use before starting.
    Extended mode asks for confirmation before it starts. If Android reports an
    active VPN transport, Traffic Lab blocks the baseline and opens VPN settings
    so it can be disabled first.
@@ -72,7 +75,7 @@ measurement samples and payload matrix, stability, real
 SOCKS5 UDP DNS, tunneled STUN mapping, invalid UUID/shortId/SNI controls, explicit XUDP A/B testing,
 classified core logs, shared-backend grouping, infrastructure signals and OSI mapping.
 
-Throughput uses one bounded calibration sample and three adaptively sized samples.
+Normal throughput uses one bounded calibration sample and three adaptively sized samples.
 It reports a median payload rate separately from effective request rate, setup/
 TTFB, sample spread and confidence. The calibration result chooses the bounded
 payload size but is excluded from the recommended median. Download payload time begins after response
@@ -81,13 +84,19 @@ request. A failed sample or high variation is retained as PARTIAL instead of
 being hidden behind a single Mbps number. The first request asks for a closed
 connection and later requests permit keep-alive reuse; connection reuse remains
 an explicit client-side request rather than an unprovable server-side fact.
+Upload payload is generated as an incompressible stream through a 64 KiB buffer,
+so larger adaptive samples do not allocate a same-sized byte array. SPEED and
+extended matrices add 1/4/16 simultaneous flows, idle/loaded latency,
+p10/median/p90, coefficient of variation, byte-cap flags and matched direct
+controls before/after the tunnel. Client CPU/heap context is retained. Direct
+drift above 25% lowers confidence.
 
 The Xray log classifier labels readiness EOF, completed UDP-association teardown
 and loopback broken-pipe/reset caused by a completed or timed-out app probe as
 expected/benign. Other failure markers remain unexpected and make tunnel.logs
 PARTIAL with the exact redacted evidence in data.logAnalysis.
 
-Extended mode additionally records 6 cold and 6 warm HTTP observations, 20
+Extended mode additionally records the parallel speed matrix, 6 cold and 6 warm HTTP observations, 20
 parallel TCP flows, 20 independent SOCKS5 UDP associations, tunneled DNS
 failure/recovery using a unique reserved .invalid name, a five-minute
 application latency/jitter/loss soak, forced Xray reconnect and a five-second
@@ -95,7 +104,9 @@ controlled interruption. The interruption stops only this app's isolated Xray
 child process. It never disables Wi-Fi/LTE, changes Android routes or affects
 other applications. Extended stages and their limitations are written only to
 extended-test.json; every result file and README identify the NORMAL or
-EXTENDED mode, Android release/API level and APK version.
+EXTENDED mode, Android release/API level and APK version. SPEED archives always
+contain exactly speed.json and readme.txt at the ZIP root; speed.json stores all
+connections in their original order.
 
 Android-specific local-machine evidence includes:
 

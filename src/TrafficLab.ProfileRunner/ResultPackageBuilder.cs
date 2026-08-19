@@ -161,9 +161,10 @@ internal static class ResultPackageBuilder
             {
                 direct = report.Node?.DirectPerformance,
                 tunnelDownload,
+                speedMatrix = stages.FirstOrDefault(item => item.Stage == "tunnel.extended.speedMatrix"),
                 coldWarm = stages.FirstOrDefault(item => item.Stage == "tunnel.extended.coldWarm"),
                 soak = stages.FirstOrDefault(item => item.Stage == "tunnel.extended.soak"),
-                interpretation = "Effective throughput includes establishment and TTFB. Payload-transfer throughput excludes the pre-first-byte interval approximately. Compare repeated warm attempts and variability; neither number is calibrated line rate."
+                interpretation = "Adaptive calibration is excluded from the median. Compare 1/4/16-flow p10/median/p90, variability, byte-cap flags, loaded latency and matched direct controls. Neither value is a calibrated line rate."
             },
             limitations = report.Limitations
         };
@@ -309,7 +310,8 @@ internal static class ResultPackageBuilder
         builder.AppendLine("Medium: multiple compatible external signals with plausible alternatives.");
         builder.AppendLine("Low: weak external hint such as IP geolocation, TLS fallback or hidden topology.");
         builder.AppendLine("Unknown: no discriminating client-side evidence.");
-        builder.AppendLine("Probability percentages are heuristic evidence weights, not calibrated statistical probabilities.").AppendLine();
+        builder.AppendLine("Probability percentages are heuristic evidence weights, not calibrated statistical probabilities.");
+        builder.AppendLine("Speed: calibration is excluded from the median; inspect sustained-window duration, p10/p90, coefficient of variation, byte-cap flags and loaded latency. Extended mode also records matched direct-before/tunnel/direct-after 1/4/16-flow comparisons.").AppendLine();
         builder.AppendLine("PRIVACY AND LIMITS");
         builder.AppendLine("------------------");
         builder.AppendLine("Raw connection URI, UUID, REALITY public key/password and short ID are not included.");

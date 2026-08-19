@@ -37,6 +37,7 @@ internal sealed class TrafficLabForm : Form
     private readonly ProgressBar progress = new();
     private readonly Button startButton = new();
     private readonly Button extendedButton = new();
+    private readonly Button speedButton = new();
     private readonly Button stopButton = new();
     private readonly Button saveButton = new();
     private readonly Button openFolderButton = new();
@@ -50,14 +51,14 @@ internal sealed class TrafficLabForm : Form
     private int profileCount;
     private double expectedSeconds;
     private int observedProgress;
-    private bool currentRunExtended;
+    private string currentRunTestType = "normal";
     private readonly StringBuilder output = new();
     public int ExitCode { get; private set; }
 
     public TrafficLabForm(bool autoStartExtended = false)
     {
         connectionFile = Path.Combine(baseDirectory, "connections.txt");
-        Text = "Loki Traffic Lab Portable 3.3.0";
+        Text = "Loki Traffic Lab Portable 3.4.0";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(820, 430);
         Size = new Size(900, 500);
@@ -91,15 +92,19 @@ internal sealed class TrafficLabForm : Form
 
         startButton.Text = "START TEST";
         startButton.Font = new Font("Segoe UI Semibold", 13f);
-        startButton.Size = new Size(190, 54);
+        startButton.Size = new Size(160, 54);
         startButton.Click += StartClicked;
         extendedButton.Text = "EXTENDED TEST";
         extendedButton.Font = new Font("Segoe UI Semibold", 13f);
-        extendedButton.Size = new Size(230, 54);
+        extendedButton.Size = new Size(200, 54);
         extendedButton.Click += ExtendedClicked;
+        speedButton.Text = "SPEED TEST";
+        speedButton.Font = new Font("Segoe UI Semibold", 13f);
+        speedButton.Size = new Size(160, 54);
+        speedButton.Click += SpeedClicked;
         stopButton.Text = "STOP TEST";
         stopButton.Font = new Font("Segoe UI Semibold", 13f);
-        stopButton.Size = new Size(190, 54);
+        stopButton.Size = new Size(160, 54);
         stopButton.Enabled = false;
         stopButton.Click += StopClicked;
         var testButtons = new FlowLayoutPanel
@@ -111,6 +116,7 @@ internal sealed class TrafficLabForm : Form
         };
         testButtons.Controls.Add(startButton);
         testButtons.Controls.Add(extendedButton);
+        testButtons.Controls.Add(speedButton);
         testButtons.Controls.Add(stopButton);
 
         progress.Dock = DockStyle.Fill;
@@ -158,7 +164,7 @@ internal sealed class TrafficLabForm : Form
         FormClosing += OnClosing;
         RefreshInputState();
         if (autoStartExtended)
-            Shown += async (_, _) => await StartTestAsync(extended: true);
+            Shown += async (_, _) => await StartTestAsync("extended");
     }
 
     private void RefreshInputState()
@@ -170,6 +176,7 @@ internal sealed class TrafficLabForm : Form
             inputLabel.Text = $"connections.txt: {profileCount} подключений, тестирование последовательно";
             startButton.Enabled = true;
             extendedButton.Enabled = true;
+            speedButton.Enabled = true;
         }
         catch
         {
@@ -177,11 +184,20 @@ internal sealed class TrafficLabForm : Form
             inputLabel.Text = "Добавьте подключения в connections.txt — по одному VLESS URI на строку";
             startButton.Enabled = false;
             extendedButton.Enabled = false;
+            speedButton.Enabled = false;
         }
     }
 
     private async void StartClicked(object? sender, EventArgs e)
-        => await StartTestAsync(extended: false);
+        => await StartTestAsync("normal");
+
+    private async void SpeedClicked(object? sender, EventArgs e)
+    {
+        var consent = MessageBox.Show(this,
+            "SPEED TEST запускает download/upload через direct и VLESS-пути с 1, 4 и 16 потоками. Тест может занять несколько минут и в худшем случае использовать около 700 МБ трафика на одно подключение. Продолжить?",
+            "Тест скорости", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2);
+        if (consent == DialogResult.Yes) await StartTestAsync("speed");
+    }
 
     private async void ExtendedClicked(object? sender, EventArgs e)
     {
@@ -218,11 +234,13 @@ internal sealed class TrafficLabForm : Form
             return;
         }
 
-        await StartTestAsync(extended: true);
+        await StartTestAsync("extended");
     }
 
-    private async Task StartTestAsync(bool extended)
+    private async Task StartTestAsync(string testType)
     {
+        var extended = string.Equals(testType, "extended", StringComparison.OrdinalIgnoreCase);
+        var speedOnly = string.Equals(testType, "speed", StringComparison.OrdinalIgnoreCase);
         RefreshInputState();
         if (profileCount == 0) return;
         var conflicts = ProxyConflictDetector.Scan();
@@ -239,9 +257,10 @@ internal sealed class TrafficLabForm : Form
         runCancellation?.Dispose();
         runCancellation = new CancellationTokenSource();
         isRunning = true;
-        currentRunExtended = extended;
+        currentRunTestType = speedOnly ? "speed" : extended ? "extended" : "normal";
         startButton.Enabled = false;
         extendedButton.Enabled = false;
+        speedButton.Enabled = false;
         stopButton.Enabled = true;
         saveButton.Enabled = false;
         openFolderButton.Enabled = false;
@@ -250,10 +269,12 @@ internal sealed class TrafficLabForm : Form
         details.Clear();
         progress.Value = 1;
         observedProgress = 1;
-        expectedSeconds = 25 + (extended ? 430 : 55) * profileCount;
+        expectedSeconds = 25 + (extended ? 560 : speedOnly ? 210 : 95) * profileCount;
         elapsed.Restart();
         timer.Start();
-        statusLabel.Text = extended ? "Расширенный тест: сбор характеристик локальной машины…" : "Сбор характеристик локальной машины…";
+        statusLabel.Text = extended ? "Расширенный тест: сбор характеристик локальной машины…"
+            : speedOnly ? "Тест скорости: direct baseline и последовательные проверки подключений…"
+            : "Сбор характеристик локальной машины…";
 
         var artifacts = Path.Combine(baseDirectory, "artifacts");
         Directory.CreateDirectory(artifacts);
@@ -264,7 +285,7 @@ internal sealed class TrafficLabForm : Form
             "--dns-attempts", "3", "--tcp-attempts", "5", "--stability-attempts", "10",
             "--negative-controls", "--xudp"
         };
-        arguments.AddRange(["--test-type", extended ? "extended" : "normal"]);
+        arguments.AddRange(["--test-type", currentRunTestType]);
         if (extended)
         {
             arguments.AddRange(["--soak-seconds", "300", "--parallel-flows", "20", "--network-loss-seconds", "5"]);
@@ -296,7 +317,8 @@ internal sealed class TrafficLabForm : Form
 
         if (ExitCode != 130 && (string.IsNullOrWhiteSpace(resultZip) || !File.Exists(resultZip)))
         {
-            resultZip = Directory.EnumerateFiles(artifacts, "traffic-lab-results-*.zip")
+            resultZip = Directory.EnumerateFiles(artifacts, "traffic-lab-*-results-*.zip")
+                .Concat(Directory.EnumerateFiles(artifacts, "traffic-lab-results-*.zip"))
                 .Select(path => new FileInfo(path)).OrderByDescending(item => item.LastWriteTimeUtc).FirstOrDefault()?.FullName;
         }
         if (ExitCode == 130)
@@ -312,7 +334,8 @@ internal sealed class TrafficLabForm : Form
         {
             progress.Value = 100;
             var sizeMb = new FileInfo(resultZip).Length / 1024d / 1024d;
-            statusLabel.Text = $"{(currentRunExtended ? "Расширенный" : "Обычный")} тест завершён. Итоговый архив: {sizeMb:F2} МБ";
+            var completedKind = currentRunTestType switch { "extended" => "Расширенный тест", "speed" => "Тест скорости", _ => "Обычный тест" };
+            statusLabel.Text = $"{completedKind} завершён. Итоговый архив: {sizeMb:F2} МБ";
             timeLabel.Text = $"Прошло: {FormatTime(elapsed.Elapsed)} · осталось: 00:00";
             saveButton.Enabled = true;
             openFolderButton.Enabled = true;
@@ -325,6 +348,7 @@ internal sealed class TrafficLabForm : Form
         }
         startButton.Enabled = true;
         extendedButton.Enabled = true;
+        speedButton.Enabled = true;
     }
 
     private void StopClicked(object? sender, EventArgs e)
@@ -356,6 +380,12 @@ internal sealed class TrafficLabForm : Form
             SetStatus($"Расширенный тест: soak подключения {soakProfile} из {profileCount} — {soakPercent}%");
         }
         else if (line.Contains(": extended:", StringComparison.OrdinalIgnoreCase)) SetStatus("Расширенный тест: " + line[(line.IndexOf(": extended:", StringComparison.OrdinalIgnoreCase) + 12)..]);
+        else if (Regex.Match(line, @"profile-(?<number>\d+):\s*(?<message>.+)", RegexOptions.IgnoreCase) is { Success: true } profileMatch
+            && int.TryParse(profileMatch.Groups["number"].Value, out var activeProfile))
+        {
+            observedProgress = Math.Max(observedProgress, 15 + (int)Math.Floor((activeProfile - 1) * 78d / Math.Max(1, profileCount)));
+            SetStatus($"Подключение {activeProfile} из {profileCount}: {profileMatch.Groups["message"].Value}");
+        }
         else if (line.Contains("Capturing direct-network baseline", StringComparison.OrdinalIgnoreCase)) SetStatus("Проверка локальной сети и direct baseline…");
         else if (line.Contains("profile summary", StringComparison.OrdinalIgnoreCase)) observedProgress = Math.Max(observedProgress, 94);
         AppendDetails(line);
@@ -393,6 +423,7 @@ internal sealed class TrafficLabForm : Form
         saveButton.Enabled = false;
         startButton.Enabled = false;
         extendedButton.Enabled = false;
+        speedButton.Enabled = false;
         openFolderButton.Enabled = false;
         var previousStatus = statusLabel.Text;
         statusLabel.Text = "Сохранение ZIP в папку Загрузки…";
@@ -424,6 +455,7 @@ internal sealed class TrafficLabForm : Form
             openFolderButton.Enabled = saveButton.Enabled;
             startButton.Enabled = !isRunning;
             extendedButton.Enabled = !isRunning;
+            speedButton.Enabled = !isRunning;
         }
     }
 

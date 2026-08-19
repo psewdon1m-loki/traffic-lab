@@ -1,4 +1,4 @@
-LOKI TRAFFIC LAB 3.3.0 - UBUNTU / LINUX
+LOKI TRAFFIC LAB 3.4.0 - UBUNTU / LINUX
 =======================================
 
 This directory contains the headless Linux adaptation of Traffic Lab. Ubuntu
@@ -10,11 +10,11 @@ INSTALL
 
 From a local checkout/release directory:
 
-  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.3.0.tar.gz
+  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.4.0.tar.gz
 
 For a hosted release, bootstrap also supports a one-line installation:
 
-  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.3.0.tar.gz
+  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.4.0.tar.gz
 
 The installer requires and verifies the archive SHA-256 sidecar, installs
 versioned files below /opt/tlab, creates /usr/local/bin/tlab, initializes a
@@ -41,13 +41,17 @@ COMMANDS
   tlab start --port 18080
   tlab extended --port 18080
   tlab extended --port 18080 --soak-seconds 300 --parallel-flows 20
+  tlab speed --port 18080
   tlab status
   tlab logs --follow
   tlab stop
   tlab raw snapshot --outdir ./snapshot
   sudo tlab raw capture --duration 30 --i-understand --outdir ./capture
 
-`tlab start` runs the normal suite. `tlab extended` is the separate command for
+`tlab start` runs the normal suite. `tlab speed` runs only speed-relevant
+endpoint/authentication prerequisites plus matched direct-before, tunnel and
+direct-after download/upload matrices with 1, 4 and 16 flows. Its ZIP contains
+exactly speed.json and readme.txt. `tlab extended` is the separate command for
 the long/disruptive suite: cold versus warm connections, 10-100 parallel
 TCP/UDP flows, DNS failure/recovery, a 5-15 minute latency/jitter/loss soak,
 forced Xray restart/reconnect and a controlled pause/recovery of only the Xray
@@ -66,10 +70,23 @@ Results are written to ~/.local/share/tlab/results by default. A normal run has
 four files per connection: connection.json, local-machine.json, osi-map.md and
 README.txt. An extended run adds a fifth, separate extended-test.json containing
 only long/disruptive stages, core-log classification and throughput correlation.
-README.txt and JSON run metadata explicitly identify NORMAL versus EXTENDED.
+README.txt and JSON run metadata explicitly identify NORMAL, EXTENDED or SPEED.
 Multiple connections receive ordered, named folders inside the archive.
+A SPEED archive is run-level and always keeps its two files at the ZIP root;
+speed.json contains the ordered per-connection results.
 
-Traffic Lab 3.3.0 preserves status for compatibility and adds outcome,
+Speed measurements use an incompressible generated upload stream with a 64 KiB
+buffer, discard download bodies, exclude calibration from the reported median,
+adapt payload size toward a sustained time window and retain raw attempts,
+p10/median/p90, coefficient of variation, byte-cap flags and idle/loaded
+latency plus client CPU/memory context. Extended and SPEED modes add 1/4/16-flow capacity and matched direct
+controls before and after the tunnel. Direct drift above 25% lowers confidence.
+SPEED is intentionally data-intensive (bounded to roughly 700 MiB per profile
+in the worst case); use it knowingly on metered links. The direct-after control
+is reduced to one flow while the full direct-before and tunnel matrices retain
+1/4/16 flows.
+
+Traffic Lab 3.4.0 preserves status for compatibility and adds outcome,
 reasonCode and a human-readable reason to every stage, profile and run. The
 causal classes are PASS, PROXY_FAIL, UNDERLAY_FAIL, TEST_FAILURE and UNKNOWN;
 PROXY_PATH_FAIL and PROTOCOL_AUTH_FAIL distinguish endpoint reachability from
@@ -135,7 +152,7 @@ BUILD
 
 From PowerShell at the repository root:
 
-  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.3.0' -Archive
+  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.4.0' -Archive
 
 Generated releases are placed in Linux/releases. Shared C# logic remains in
 traffic-lab/src; this folder contains only Linux packaging, runtime assets and

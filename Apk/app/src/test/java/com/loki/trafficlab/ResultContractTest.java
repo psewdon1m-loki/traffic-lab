@@ -7,6 +7,11 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.io.File;
+import java.nio.file.Files;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.zip.ZipFile;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -45,7 +50,32 @@ public class ResultContractTest {
 
     @Test public void testTypeParsingIsExplicitAndSafe() {
         assertEquals(TrafficLabRunner.TestType.EXTENDED, TrafficLabRunner.TestType.from("extended"));
+        assertEquals(TrafficLabRunner.TestType.SPEED, TrafficLabRunner.TestType.from("speed"));
         assertEquals(TrafficLabRunner.TestType.NORMAL, TrafficLabRunner.TestType.from("unexpected"));
+    }
+
+    @Test public void speedDocumentUsesDedicatedTwoFileContract() throws Exception {
+        JSONArray stages = new JSONArray().put(JsonUtil.passed("speed.directBefore", 1,
+                JsonUtil.object("status", "passed", "series", new JSONArray())));
+        TrafficLabRunner.ProfileResult profile = new TrafficLabRunner.ProfileResult(
+                "profile-01", 1, "sample", "fingerprint", new JSONObject(), Collections.emptyList(), Collections.emptyList(),
+                new JSONArray(), new JSONArray(), new JSONArray(), stages, new JSONArray(), new JSONArray(), true,
+                JsonUtil.object("outcome", "PASS", "reasonCode", "SPEED_MEASUREMENT_SUCCEEDED", "reason", "test"));
+        ResultPackager.PackageInput input = input(TrafficLabRunner.TestType.SPEED, Collections.singletonList(profile));
+        JSONObject result = ResultPackager.speedJson(input);
+        assertEquals("speed-test-results", result.getString("outputType"));
+        assertEquals("speed", result.getJSONObject("run").getString("testType"));
+        assertEquals(1, result.getJSONArray("profiles").length());
+        assertEquals(3_000, result.getJSONObject("measurementProtocol").getInt("measurementWindowTargetMs"));
+        File root = Files.createTempDirectory("tlab-android-speed-package-").toFile();
+        try {
+            File zip = ResultPackager.create(root, input);
+            try (ZipFile archive = new ZipFile(zip)) {
+                Set<String> names = new HashSet<>();
+                archive.stream().forEach(entry -> names.add(entry.getName()));
+                assertEquals(new HashSet<>(Arrays.asList("speed.json", "readme.txt")), names);
+            }
+        } finally { deleteTree(root); }
     }
 
     @Test public void latencyPercentilesUseNearestRank() {
@@ -55,7 +85,7 @@ public class ResultContractTest {
     }
 
     @Test public void extendedEtaAccountsForTheFixedFiveMinuteSoak() {
-        assertEquals(330_000L, ProgressEstimate.remaining(90_000L, 75, 1, true, TrafficLabRunner.TestType.EXTENDED));
+        assertEquals(570_000L, ProgressEstimate.remaining(90_000L, 75, 1, true, TrafficLabRunner.TestType.EXTENDED));
         assertEquals(30_000L, ProgressEstimate.remaining(90_000L, 75, 1, true, TrafficLabRunner.TestType.NORMAL));
         assertEquals(-1L, ProgressEstimate.remaining(90_000L, 100, 1, false, TrafficLabRunner.TestType.EXTENDED));
     }
@@ -64,5 +94,12 @@ public class ResultContractTest {
         return new ResultPackager.PackageInput("run-12345678", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z", 60_000,
                 "Xray test", new JSONObject(), new JSONArray(), new JSONArray(), profiles, type,
                 JsonUtil.object("outcome", "PASS", "reasonCode", "RUN_COMPLETED_WITH_USABLE_PROFILE", "reason", "test"));
+    }
+
+    private static void deleteTree(File file) {
+        if (file == null || !file.exists()) return;
+        File[] children = file.listFiles(); if (children != null) for (File child : children) deleteTree(child);
+        //noinspection ResultOfMethodCallIgnored
+        file.delete();
     }
 }

@@ -25,7 +25,11 @@ final class ResultPackager {
     private ResultPackager() {}
 
     static File create(Context context, PackageInput input) throws Exception {
-        File directory = new File(context.getCacheDir(), "results");
+        return create(context.getCacheDir(), input);
+    }
+
+    static File create(File cacheDirectory, PackageInput input) throws Exception {
+        File directory = new File(cacheDirectory, "results");
         deleteTree(directory);
         if (!directory.mkdirs() && !directory.isDirectory()) throw new IllegalStateException("Could not create result cache");
         String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date());
@@ -34,6 +38,11 @@ final class ResultPackager {
         Set<String> folders = new HashSet<>();
         try (ZipOutputStream output = new ZipOutputStream(new FileOutputStream(zip), StandardCharsets.UTF_8)) {
             output.setLevel(9);
+            if (input.testType.speed()) {
+                write(output, "speed.json", speedJson(input).toString(2));
+                write(output, "readme.txt", speedReadme(input));
+                return zip;
+            }
             for (TrafficLabRunner.ProfileResult profile : input.profiles) {
                 String prefix = input.profiles.size() == 1 ? "" : uniqueFolder(profile, folders) + "/";
                 write(output, prefix + "connection.json", connectionJson(input, profile, shared).toString(2));
@@ -44,6 +53,64 @@ final class ResultPackager {
             }
         }
         return zip;
+    }
+
+    static JSONObject speedJson(PackageInput input) {
+        JSONObject root = base(input, "speed-test-results");
+        JsonUtil.put(root, "measurementProtocol", JsonUtil.object(
+                "calibrationExcluded", true, "measurementWindowTargetMs", 3000,
+                "parallelFlowCounts", new JSONArray().put(1).put(4).put(16),
+                "directControls", "full 1/4/16 matrix before tunnel plus bounded 1-flow control after tunnel",
+                "statistics", new JSONArray().put("median").put("p10").put("p90").put("coefficientOfVariation"),
+                "latency", "idle and concurrent loaded HTTPS latency",
+                "uploadPayload", "incompressible generated stream with a 64 KiB buffer per flow"));
+        JSONObject network = input.node.optJSONObject("connectivity");
+        JSONObject testNode = JsonUtil.object("platform", "android", "operatingSystem", "Android " + androidRelease(),
+                "device", Build.MANUFACTURER + " " + Build.MODEL,
+                "accessType", network == null ? "unknown" : network.optString("detectedAccessType", "unknown"),
+                "connectivity", input.node.opt("connectivity"), "wifi", input.node.opt("wifi"),
+                "cellular", input.node.opt("cellular"), "powerAndPolicy", input.node.opt("powerAndPolicy"),
+                "deviceLocation", input.node.opt("deviceLocation"));
+        JsonUtil.put(root, "testNode", testNode);
+        JSONArray profiles = new JSONArray();
+        for (TrafficLabRunner.ProfileResult profile : input.profiles) {
+            profiles.put(JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal,
+                    "name", profile.name, "profileFingerprint", profile.fingerprint, "declared", profile.declared,
+                    "endpointIps", JsonUtil.array(profile.endpointIps), "outcome", profile.outcome,
+                    "speedStages", profile.stages));
+        }
+        JsonUtil.put(root, "profiles", profiles);
+        JsonUtil.put(root, "runOutcome", input.runOutcome);
+        JsonUtil.put(root, "limitations", new JSONArray()
+                .put("The public Cloudflare measurement endpoint, Android radio state, thermal/power policy and byte caps can limit the result below access-line capacity.")
+                .put("A direct-control drift above 25% makes proxy attribution low-confidence.")
+                .put("The direct-after control intentionally uses one flow to limit mobile-data use; 4/16-flow ratios use direct-before and inherit the 1-flow drift confidence.")
+                .put("The test is application-layer HTTPS capacity, not a modem PHY-rate measurement."));
+        return root;
+    }
+
+    private static String speedReadme(PackageInput input) {
+        return "LOKI TRAFFIC LAB - ANDROID SPEED TEST\n"
+                + "=======================================\n\n"
+                + "Run ID: " + input.runId + "\n"
+                + "Test started (UTC): " + input.startedAt + "\n"
+                + "Test completed (UTC): " + input.completedAt + "\n"
+                + "Duration: " + formatDuration(input.durationMs) + "\n"
+                + "Test type: SPEED (speed-only suite)\n"
+                + "Platform: android\n"
+                + "Operating system: Android " + androidRelease() + " (API " + Build.VERSION.SDK_INT + ")\n"
+                + "Device: " + Build.MANUFACTURER + " " + Build.MODEL + "\n"
+                + "Tool: Loki Traffic Lab Android " + BuildConfig.VERSION_NAME + "\n"
+                + "Connections tested: " + input.profiles.size() + "\n"
+                + "Run outcome: " + input.runOutcome.optString("outcome", "UNKNOWN") + " (" + input.runOutcome.optString("reasonCode", "RUN_INCONCLUSIVE") + ")\n\n"
+                + "FILES\n-----\n"
+                + "speed.json  Direct-before, tunnel and direct-after 1/4/16-flow measurements, raw attempts, latency-under-load, statistics and causal outcomes.\n"
+                + "readme.txt  This run metadata and method guide.\n\n"
+                + "METHOD\n------\n"
+                + "Each speed series uses a small calibration transfer followed by three adaptive measurement windows. Calibration is excluded from the reported median. Download data is discarded while reading; upload data is generated through bounded 64 KiB buffers. Reports retain median, p10, p90, coefficient of variation, cap flags, idle latency, loaded latency and direct-network drift.\n\n"
+                + "DATA BUDGET\n-----------\nThe Android worst-case transfer budget is approximately 500 MiB per profile. Actual use is usually lower because adaptive payloads stop below the cap on slower paths.\n\n"
+                + "PRIVACY AND LIMITS\n------------------\n"
+                + "Raw VLESS credentials are never stored. Public/local IP metadata and optional Android device location can be sensitive. Speed tests can consume substantial mobile data. The result is application-layer HTTPS capacity to the selected public endpoint, not a guaranteed ISP or modem line rate.\n";
     }
 
     private static JSONObject connectionJson(PackageInput input, TrafficLabRunner.ProfileResult profile, Map<String, List<String>> shared) {

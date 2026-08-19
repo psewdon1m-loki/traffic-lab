@@ -27,11 +27,14 @@ final class TrafficLabRunner {
     interface ProgressListener { void onProgress(int percent, int completed, int total, String message); }
 
     enum TestType {
-        NORMAL("normal"), EXTENDED("extended");
+        NORMAL("normal"), EXTENDED("extended"), SPEED("speed");
         final String value;
         TestType(String value) { this.value = value; }
         boolean extended() { return this == EXTENDED; }
-        static TestType from(String value) { return "extended".equalsIgnoreCase(value) ? EXTENDED : NORMAL; }
+        boolean speed() { return this == SPEED; }
+        static TestType from(String value) {
+            return "extended".equalsIgnoreCase(value) ? EXTENDED : "speed".equalsIgnoreCase(value) ? SPEED : NORMAL;
+        }
     }
 
     private final Context context;
@@ -57,6 +60,8 @@ final class TrafficLabRunner {
         String runId = startedAt.replaceAll("[-:.TZ]", "").substring(0, 14) + "-" + UUID.randomUUID().toString().substring(0, 8);
         report(2, 0, connections.size(), "Loaded " + connections.size() + " connection(s) for " + testType.value + " test");
         checkCanceled();
+
+        if (testType.speed()) return runSpeedOnly(connections, testType, startedNanos, startedAt, runId);
 
         report(5, 0, connections.size(), "Capturing Android network baseline");
         JSONObject node = AndroidNetworkDiagnostics.capture(context);
@@ -98,6 +103,123 @@ final class TrafficLabRunner {
         for (ProfileResult profile : profiles) if (profile.usable) { usable = true; break; }
         report(100, connections.size(), connections.size(), usable ? "Testing completed successfully" : "Testing completed with no usable profile");
         return new RunResult(zip, profiles.size(), durationMs, usable, startedAt, completedAt, testType, runOutcome);
+    }
+
+    private RunResult runSpeedOnly(List<String> connections, TestType testType, long startedNanos,
+                                   String startedAt, String runId) throws Exception {
+        report(4, 0, connections.size(), "Capturing Android network context for speed test");
+        JSONObject node = AndroidNetworkDiagnostics.capture(context);
+        List<ProfileResult> profiles = new ArrayList<>();
+        boolean anyDirectControl = false;
+        for (int index = 0; index < connections.size(); index++) {
+            checkCanceled(); int ordinal = index + 1;
+            int startPercent = 5 + (int) Math.floor(index * 90.0 / connections.size());
+            int endPercent = 5 + (int) Math.floor((index + 1) * 90.0 / connections.size());
+            String profileId = "profile-" + String.format(Locale.ROOT, "%02d", ordinal);
+            JSONArray stages = new JSONArray(); ConnectionParser.Profile profile;
+            try {
+                profile = ConnectionParser.parse(connections.get(index));
+                stages.put(JsonUtil.passed("profile.parse", 0, profile.declared()));
+            } catch (Exception error) {
+                stages.put(JsonUtil.failed("profile.parse", 0, JsonUtil.redact(error.getMessage()), null));
+                AndroidOutcomeClassifier.applyProfile(stages, new JSONArray(), true);
+                profiles.add(new ProfileResult(profileId, ordinal, "Invalid profile " + ordinal, "unavailable", new JSONObject(),
+                        Collections.<String>emptyList(), Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(),
+                        stages, new JSONArray(), new JSONArray(), false,
+                        speedDecision("TEST_FAILURE", "PROFILE_PARSE_FAILURE", "The supplied connection URI could not be parsed.")));
+                report(endPercent, ordinal, connections.size(), profileId + ": invalid profile skipped");
+                continue;
+            }
+
+            report(startPercent + (endPercent - startPercent) * 5 / 100, index, connections.size(), profileId + ": direct speed control before tunnel");
+            JSONObject directBefore = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.SPEED, this::checkCanceled);
+            boolean directAvailable = !"failed".equals(directBefore.optString("status")); anyDirectControl |= directAvailable;
+            stages.put(speedStage("speed.directBefore", directBefore, false));
+
+            report(startPercent + (endPercent - startPercent) * 30 / 100, index, connections.size(), profileId + ": endpoint DNS and TCP");
+            ProbeSuite.DnsResult dns = ProbeSuite.dns(profile.host); stages.put(dns.stage);
+            JSONObject tcp = ProbeSuite.tcp(dns.addresses, profile.port, 3); stages.put(tcp);
+            JSONObject tunnelSpeed = JsonUtil.object("status", "failed", "error", "Tunnel speed was not attempted.");
+            boolean authenticated = false;
+            if ("passed".equals(tcp.optString("status"))) {
+                try (XrayManager.RunSession session = xray.start(profile)) {
+                    stages.put(JsonUtil.passed("tunnel.coreValidation", 0, JsonUtil.object("embeddedCore", true, "abi", android.os.Build.SUPPORTED_ABIS[0])));
+                    stages.put(JsonUtil.passed("tunnel.coreStart", 0, JsonUtil.object("httpPort", session.httpPort, "loopbackOnly", true)));
+                    Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", session.httpPort));
+                    JSONObject http = ProbeSuite.httpStage(proxy); authenticated = "passed".equals(http.optString("status"));
+                    stages.put(authenticated
+                            ? JsonUtil.passed("tunnel.authenticatedEndToEnd", http.optLong("elapsedMs"), JsonUtil.object("protocol", "vless", "speedPrerequisite", true))
+                            : JsonUtil.failed("tunnel.authenticatedEndToEnd", http.optLong("elapsedMs"), "No authenticated control request completed before speed measurement.", http));
+                    if (authenticated) {
+                        report(startPercent + (endPercent - startPercent) * 45 / 100, index, connections.size(), profileId + ": tunnel 1/4/16-flow speed matrix");
+                        tunnelSpeed = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.SPEED, this::checkCanceled);
+                        stages.put(speedStage("speed.tunnel", tunnelSpeed, true));
+                    } else stages.put(JsonUtil.skipped("speed.tunnel", "Authenticated tunnel prerequisite failed."));
+                } catch (Exception error) {
+                    stages.put(JsonUtil.failed("tunnel.coreStart", 0, JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage()), null));
+                    stages.put(JsonUtil.skipped("tunnel.authenticatedEndToEnd", "The isolated Xray core was unavailable."));
+                    stages.put(JsonUtil.skipped("speed.tunnel", "The isolated Xray core was unavailable."));
+                }
+            } else {
+                stages.put(JsonUtil.skipped("tunnel.coreValidation", "Endpoint TCP prerequisite failed."));
+                stages.put(JsonUtil.skipped("tunnel.coreStart", "Endpoint TCP prerequisite failed."));
+                stages.put(JsonUtil.skipped("tunnel.authenticatedEndToEnd", "Endpoint TCP prerequisite failed."));
+                stages.put(JsonUtil.skipped("speed.tunnel", "Endpoint TCP prerequisite failed."));
+            }
+
+            report(startPercent + (endPercent - startPercent) * 78 / 100, index, connections.size(), profileId + ": direct speed control after tunnel");
+            JSONObject directAfter = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.CONTROL, this::checkCanceled);
+            directAvailable |= !"failed".equals(directAfter.optString("status"));
+            anyDirectControl |= directAvailable;
+            stages.put(speedStage("speed.directAfter", directAfter, false));
+            JSONObject comparison = AndroidSpeedTestEngine.compare(directBefore, tunnelSpeed, directAfter);
+            stages.put(authenticated ? (comparison.optBoolean("directControlStable")
+                    ? JsonUtil.passed("speed.comparison", 0, comparison)
+                    : JsonUtil.partial("speed.comparison", 0, "Direct before/after capacity drifted or was unavailable; tunnel attribution is low-confidence.", comparison))
+                    : JsonUtil.skipped("speed.comparison", "No tunnel speed result was available."));
+            AndroidOutcomeClassifier.applyProfile(stages, new JSONArray(), directAvailable);
+            JSONObject outcome = !directAvailable
+                    ? speedDecision("UNDERLAY_FAIL", "DIRECT_CONTROL_UNAVAILABLE", "Matched direct speed controls produced no usable measurement.")
+                    : !"passed".equals(tcp.optString("status"))
+                    ? speedDecision("PROXY_FAIL", "PROXY_PATH_FAIL", "The profile endpoint was not TCP-reachable.")
+                    : !authenticated
+                    ? speedDecision("PROXY_FAIL", "PROTOCOL_AUTH_FAIL", "Endpoint TCP worked but authenticated VLESS traffic did not.")
+                    : "failed".equals(tunnelSpeed.optString("status"))
+                    ? speedDecision("UNKNOWN", "SPEED_MEASUREMENT_INCONCLUSIVE", "Authentication succeeded but no tunnel speed series completed.")
+                    : speedDecision("PASS", "SPEED_MEASUREMENT_SUCCEEDED", "Matched direct and authenticated tunnel speed measurements completed.");
+            profiles.add(new ProfileResult(profileId, ordinal, profile.name, profile.fingerprint(), profile.declared(), dns.addresses,
+                    Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(), stages,
+                    new JSONArray(), new JSONArray(), authenticated, outcome));
+            report(endPercent, ordinal, connections.size(), profileId + ": speed test completed");
+        }
+
+        String completedAt = JsonUtil.now(); long durationMs = ProbeSuite.elapsed(startedNanos);
+        JSONArray outcomes = new JSONArray(); boolean usable = false;
+        for (ProfileResult profile : profiles) { outcomes.put(profile.outcome); usable |= profile.usable; }
+        boolean allTestFailure = profiles.size() > 0;
+        for (ProfileResult profile : profiles) allTestFailure &= "TEST_FAILURE".equals(profile.outcome.optString("outcome"));
+        JSONObject runOutcome = allTestFailure
+                ? speedDecision("TEST_FAILURE", "ALL_PROFILES_TEST_FAILURE", "Every connection was rejected before a fair speed-path measurement could start.")
+                : AndroidOutcomeClassifier.run(outcomes, anyDirectControl);
+        ResultPackager.PackageInput input = new ResultPackager.PackageInput(runId, startedAt, completedAt, durationMs,
+                xray.version(), node, new JSONArray(), new JSONArray(), profiles, testType, runOutcome);
+        report(97, profiles.size(), profiles.size(), "Creating speed.json and readme.txt");
+        File zip = ResultPackager.create(context, input);
+        report(100, profiles.size(), profiles.size(), "Speed testing completed: " + runOutcome.optString("outcome", "UNKNOWN"));
+        return new RunResult(zip, profiles.size(), durationMs, usable, startedAt, completedAt, testType, runOutcome);
+    }
+
+    private static JSONObject speedStage(String name, JSONObject report, boolean proxyPath) {
+        String status = report.optString("status", "failed"); long elapsedMs = report.optLong("elapsedMs");
+        if ("passed".equals(status)) return JsonUtil.passed(name, elapsedMs, report);
+        String reason = proxyPath ? "One or more tunneled speed series did not complete." : "One or more direct speed series did not complete.";
+        return "partial".equals(status) ? JsonUtil.partial(name, elapsedMs, reason, report)
+                : JsonUtil.failed(name, elapsedMs, reason, report);
+    }
+
+    private static JSONObject speedDecision(String outcome, String reasonCode, String reason) {
+        return JsonUtil.object("outcome", outcome, "reasonCode", reasonCode, "reason", reason,
+                "evidence", new JSONArray().put("speed.directBefore").put("speed.tunnel").put("speed.directAfter"));
     }
 
     private ProfileResult runProfile(String raw, int ordinal, JSONArray directExit, boolean directControlAvailable, Integer activeMtu, ProgressListener listener, TestType testType) throws Exception {
@@ -258,7 +380,7 @@ final class TrafficLabRunner {
 
     private static JSONArray skippedExtendedStages(String reason) {
         JSONArray stages = new JSONArray();
-        for (String name : new String[]{"tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp",
+        for (String name : new String[]{"tunnel.extended.speedMatrix", "tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp",
                 "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.networkInterruption"}) {
             stages.put(JsonUtil.skipped(name, reason));
         }

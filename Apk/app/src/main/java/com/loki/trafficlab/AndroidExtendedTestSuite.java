@@ -28,22 +28,26 @@ final class AndroidExtendedTestSuite {
 
     static JSONArray run(XrayManager xray, ConnectionParser.Profile profile, CancelCheck cancel, Progress progress) throws InterruptedException {
         JSONArray stages = new JSONArray();
+        JSONObject directSpeedBefore = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.EXTENDED, cancel::check);
+        JSONObject tunnelSpeed = null;
         XrayManager.RunSession session = null;
         try {
             cancel.check();
             session = xray.start(profile);
             Proxy proxy = httpProxy(session.httpPort);
+            tunnelSpeed = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.EXTENDED, cancel::check);
+            progress.update(12, "extended speed matrix completed");
             stages.put(coldWarm(proxy, cancel));
-            progress.update(12, "cold/warm connection comparison completed");
+            progress.update(20, "cold/warm connection comparison completed");
             stages.put(parallelTcp(proxy, cancel));
-            progress.update(24, "parallel TCP flows completed");
+            progress.update(30, "parallel TCP flows completed");
             stages.put(parallelUdp(session.socksPort, cancel));
-            progress.update(36, "parallel UDP flows completed");
+            progress.update(40, "parallel UDP flows completed");
             stages.put(dnsFailureRecovery(proxy, cancel));
-            progress.update(44, "DNS failure/recovery completed");
+            progress.update(48, "DNS failure/recovery completed");
             stages.put(soak(proxy, cancel, (elapsed, total) ->
-                    progress.update(44 + (int) Math.min(40, elapsed * 40L / Math.max(1, total)), "extended stability soak")));
-            progress.update(84, "five-minute stability soak completed");
+                    progress.update(48 + (int) Math.min(34, elapsed * 34L / Math.max(1, total)), "extended stability soak")));
+            progress.update(82, "five-minute stability soak completed");
         } catch (InterruptedException error) {
             throw error;
         } catch (Exception error) {
@@ -54,6 +58,19 @@ final class AndroidExtendedTestSuite {
             }
         } finally {
             if (session != null) session.close();
+        }
+
+        cancel.check();
+        JSONObject directSpeedAfter = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.CONTROL, cancel::check);
+        if (tunnelSpeed == null) {
+            stages.put(JsonUtil.skipped("tunnel.extended.speedMatrix", "The isolated tunnel speed session was unavailable."));
+        } else {
+            JSONObject data = JsonUtil.object("directBefore", directSpeedBefore, "tunnel", tunnelSpeed,
+                    "directAfter", directSpeedAfter,
+                    "comparison", AndroidSpeedTestEngine.compare(directSpeedBefore, tunnelSpeed, directSpeedAfter));
+            boolean stable = data.optJSONObject("comparison").optBoolean("directControlStable");
+            stages.put(stable ? JsonUtil.passed("tunnel.extended.speedMatrix", 0, data)
+                    : JsonUtil.partial("tunnel.extended.speedMatrix", 0, "Direct control drift exceeded 25% or lacked comparable samples.", data));
         }
 
         cancel.check();

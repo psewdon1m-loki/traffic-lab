@@ -1,4 +1,4 @@
-Loki Traffic Lab Portable 3.3.0
+Loki Traffic Lab Portable 3.4.0
 ==============================
 
 Results preserve status and add causal outcome/reason fields at stage, profile
@@ -19,7 +19,9 @@ not sufficient to block START: it cannot change Traffic Lab's direct route.
 the isolated Xray process tree, removes incomplete result files and enables a
 fresh START only after cleanup has completed.
 
-START TEST runs the standard suite. EXTENDED TEST additionally runs a 5-minute
+START TEST runs the standard suite. SPEED TEST runs only endpoint/authentication
+prerequisites and matched direct-before, tunnel and direct-after speed checks;
+its ZIP contains exactly speed.json and readme.txt. EXTENDED TEST additionally runs a 5-minute
 latency/jitter/loss soak for every connection, cold-versus-warm requests, 20
 parallel TCP and UDP flows, DNS failure/recovery, an isolated Xray restart and
 a 5-second Windows Firewall interruption scoped only to the bundled xray.exe.
@@ -29,7 +31,7 @@ temporary rule named LokiTrafficLab-Temporary-ProcessBlock is removed before
 and after the fault test, including cancellation cleanup. With multiple
 connections the five-minute soak runs once per connection, sequentially.
 
-Every result README and structured output records Test type: NORMAL or EXTENDED
+Every result README and structured output records Test type: NORMAL, EXTENDED or SPEED
 and, for extended runs, the soak, parallel-flow, interruption and elevation
 metadata.
 
@@ -40,11 +42,16 @@ Firewall window are labelled expected/induced. UDP closed-pipe and association
 EOF teardown messages are labelled benign lifecycle events. Only genuinely
 unexpected markers can downgrade tunnel.logs to partial.
 
-Download reports separate bounded-request effective throughput (includes
-connect/TLS/TTFB) from approximate payload-transfer throughput after first
-byte. Direct and tunnel downloads use three attempts with an explicit cold
-first request and warm follow-ups; neither value is described as calibrated
-line rate.
+Speed reports use incompressible streaming upload with a bounded 64 KiB buffer,
+discard downloaded bodies, separate effective request rate from post-first-byte
+payload rate, exclude calibration from the median and adapt payload sizes toward
+a sustained time window. Raw attempts, p10/median/p90, coefficient of variation,
+byte-cap flags and idle/loaded latency are retained. EXTENDED and SPEED modes add
+bounded client CPU/memory context, 1/4/16-flow capacity and matched direct controls; drift above 25% lowers
+confidence. No value is described as a calibrated ISP line rate.
+SPEED TEST asks for confirmation because its worst-case byte budget is roughly
+700 MiB per profile. The full direct-before and tunnel matrices use 1/4/16
+flows; the direct-after drift control is intentionally reduced to one flow.
 
 1. Put one complete VLESS URI per line in connections.txt. Blank lines and
    lines beginning with #, ; or // are ignored. Lines are tested in order.
@@ -104,6 +111,8 @@ contains connection.json, local-machine.json, osi-map.md and README.txt at its
 root. A multi-connection archive has one ordered, safely named folder per
 connection, with those same four files inside. Probability percentages in JSON
 are heuristic evidence weights and are not calibrated statistical probabilities.
+A SPEED run instead creates traffic-lab-speed-results-*.zip with exactly
+speed.json and readme.txt at the archive root, including multiple connections.
 
 The extended run also records the test PC's public/local IPs, access type,
 provider/geolocation hints, direct speed, NAT/CGNAT evidence, gateway/router

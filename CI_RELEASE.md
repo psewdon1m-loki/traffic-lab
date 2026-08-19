@@ -20,8 +20,8 @@ retain short-lived CI artifacts for inspection.
 no branch, pull-request or manual publication trigger. A release starts with:
 
 ```bash
-git tag v3.3.0
-git push origin v3.3.0
+git tag v3.4.0
+git push origin v3.4.0
 ```
 
 The workflow rejects a tag that does not point at the checked-out commit or

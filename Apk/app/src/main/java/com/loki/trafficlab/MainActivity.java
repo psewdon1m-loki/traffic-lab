@@ -52,6 +52,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     private ProgressBar progress;
     private Button start;
     private Button extended;
+    private Button speed;
     private Button paste;
     private Button clear;
     private LinearLayout resultExportCard;
@@ -122,9 +123,10 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); progress.setMax(100); progress.setProgress(0);
         progressCard.addView(progress, params(-1, dp(18), 0, 12, 0, 6));
         time = text("Elapsed 00:00:00 · ETA --:--:--", 13, Color.rgb(82, 92, 116)); progressCard.addView(time);
-        start = button("Start test", false); extended = button("Extended test", true);
+        start = button("Start test", false); extended = button("Extended test", true); speed = button("Speed test", true);
         LinearLayout testButtons = row(); testButtons.addView(start, params(0, dp(52), 1, 0, 6, 0));
-        testButtons.addView(extended, params(0, dp(52), 1, 6, 0, 0)); progressCard.addView(testButtons, params(-1, -2, 0, 14, 0, 0));
+        testButtons.addView(extended, params(0, dp(52), 1, 6, 6, 0));
+        testButtons.addView(speed, params(0, dp(52), 1, 6, 0, 0)); progressCard.addView(testButtons, params(-1, -2, 0, 14, 0, 0));
 
         resultExportCard = card(); resultExportCard.setVisibility(View.GONE);
         root.addView(resultExportCard, params(-1, -2, 0, 0, 0, 0));
@@ -139,6 +141,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         paste.setOnClickListener(view -> pasteClipboard()); clear.setOnClickListener(view -> clearEverything());
         start.setOnClickListener(view -> startOrStop(TrafficLabRunner.TestType.NORMAL));
         extended.setOnClickListener(view -> startOrStop(TrafficLabRunner.TestType.EXTENDED));
+        speed.setOnClickListener(view -> startOrStop(TrafficLabRunner.TestType.SPEED));
         save.setOnClickListener(view -> saveZip()); share.setOnClickListener(view -> shareZip());
         connections.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -169,9 +172,16 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         }
         if (testType.extended()) {
             new AlertDialog.Builder(this).setTitle("Start extended test?")
-                    .setMessage("Extended test normally takes 5–10 minutes per connection. It runs parallel TCP/UDP flows, a five-minute soak and intentionally restarts only Traffic Lab's isolated Xray process. Android routes, radios and other applications are not changed.")
+                    .setMessage("Extended test normally takes 8–15 minutes per connection. It runs a 1/4/16-flow speed matrix, parallel TCP/UDP flows, a five-minute soak and intentionally restarts only Traffic Lab's isolated Xray process. Android routes, radios and other applications are not changed.")
                     .setNegativeButton("Cancel", null)
                     .setPositiveButton("Start extended test", (dialog, which) -> prepareStart(testType)).show();
+            return;
+        }
+        if (testType.speed()) {
+            new AlertDialog.Builder(this).setTitle("Start speed test?")
+                    .setMessage("Speed test runs only relevant endpoint/authentication checks plus adaptive direct-before, tunnel and direct-after download/upload matrices with 1, 4 and 16 parallel flows. It may take several minutes per connection and can use hundreds of MB of data. Continue?")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Start speed test", (dialog, which) -> prepareStart(testType)).show();
             return;
         }
         prepareStart(testType);
@@ -280,7 +290,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
 
     private void render(TrafficLabService.State state) {
         latestState = state; progress.setProgress(state.percent);
-        boolean running = state.running(); connections.setEnabled(!running); paste.setEnabled(!running); clear.setEnabled(!running); extended.setEnabled(!running);
+        boolean running = state.running(); connections.setEnabled(!running); paste.setEnabled(!running); clear.setEnabled(!running); extended.setEnabled(!running); speed.setEnabled(!running);
         start.setText(running ? "Stop test" : "Start test"); latestZip = state.zip;
         boolean resultReady = state.completed() && latestZip != null && latestZip.isFile();
         status.setText(state.message + (state.total > 0 ? " · " + state.completed + "/" + state.total : ""));

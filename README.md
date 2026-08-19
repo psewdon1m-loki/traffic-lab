@@ -162,10 +162,11 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.3.0.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.4.0.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
+`tlab extended`, `tlab speed`,
 `tlab status`, `tlab logs --follow`, and emergency `tlab stop`. Start prompts
 for a loopback-only test port, displays a stable single-line progress bar and
 exits automatically with an archive summary; UFW is not disabled, flushed, or modified. Linux uses
@@ -212,7 +213,7 @@ five-minute latency/jitter/loss soak per profile, cold/warm comparison, 20
 parallel TCP and UDP flows, DNS failure/recovery, an isolated Xray restart and
 a five-second Windows Firewall interruption scoped only to the bundled
 `xray.exe`. It never disables the adapter or blocks unrelated applications.
-Every report records `NORMAL` or `EXTENDED` plus the extended parameters.
+Every report records `NORMAL`, `EXTENDED`, or `SPEED` plus mode-specific parameters.
 Version 3.1.1 adds `extended-test.json` as the fifth per-profile file in an
 extended result package. Controlled Firewall failures are recorded with an
 `expectedFailureWindow` and classified as induced; successful UDP-association
@@ -240,6 +241,20 @@ Android release 3.3.0 shows a persistent `Result export` card in the main screen
 only after the ZIP is ready. Save/Share can be used repeatedly; the card and
 temporary archive remain available until a new test starts or connections are
 cleared.
+Release 3.4.0 adds `SPEED TEST`/`tlab speed`/`Speed test` on Windows, Linux and
+Android. This mode runs only speed-relevant endpoint/authentication checks and
+matched direct-before, tunnel and direct-after download/upload matrices with 1,
+4 and 16 concurrent flows. Its ZIP contains exactly `speed.json` and
+`readme.txt`, including when several connections are tested. Normal mode now
+uses longer adaptive transfer windows; extended mode adds the parallel speed
+matrix. Upload is incompressible and streamed through bounded buffers. Reports
+retain raw attempts, p10/median/p90, coefficient of variation, byte-cap flags,
+idle/loaded latency, bounded client CPU/memory context and direct-control drift;
+drift above 25% lowers confidence.
+The explicit speed-only suite is data-intensive but bounded: desktop/Linux use
+roughly 700 MiB per profile in the worst case and Android roughly 500 MiB. The
+direct-after drift control is intentionally one-flow; full 1/4/16 matrices are
+retained for direct-before and tunnel paths.
 `STOP TEST` cancels rather than pauses: it
 terminates the current Xray process tree, removes incomplete outputs and makes
 the next START begin a new run from the first connection. Progress is deliberately labelled approximate because
@@ -308,6 +323,10 @@ files. Folder names are derived from URI display names, stripped of unsafe path
 characters and made unique. Duplicate endpoints and credentials-independent
 fingerprints remain separate profile instances.
 
+A speed-only run creates `traffic-lab-speed-results-*.zip`. It always contains
+exactly `speed.json` and `readme.txt` at the root; ordered results for all
+connections are stored inside the single JSON document.
+
 Starting with 3.3.0, `status` remains for compatibility, but every stage also
 contains `outcome`, `reasonCode`, and a human-readable reason. Every profile and
 the complete run receive the same causal result contract:
@@ -330,8 +349,9 @@ stored together.
 
 The archive is written directly through streaming compression. It excludes the
 portable executables, packet captures, SQLite history and network test payloads;
-the GUI retains only a bounded tail of console output. Direct speed buffers are
-bounded to 2 MiB download and 512 KiB upload.
+the GUI retains only a bounded tail of console output. Download payload is
+discarded while reading and upload is generated through a bounded 64 KiB buffer
+per active flow; configured byte budgets are recorded in every speed series.
 
 Other commands:
 

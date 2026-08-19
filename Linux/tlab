@@ -25,13 +25,17 @@ Usage:
              [--outdir DIR] [--plan FILE] [runner options]
   tlab extended [--port PORT] [--detach] [--connections FILE]
                 [--outdir DIR] [--plan FILE] [runner options]
+  tlab speed [--port PORT] [--detach] [--connections FILE]
+             [--outdir DIR] [runner options]
   tlab stop
   tlab status
   tlab logs [--follow]
   tlab self-test
   tlab raw <native Traffic Lab command and arguments>
 
-`tlab start` runs the normal suite. `tlab extended` additionally runs the long
+`tlab start` runs the normal suite. `tlab speed` runs only calibrated direct
+and tunnel speed measurements and creates a two-file ZIP (speed.json and
+readme.txt). `tlab extended` additionally runs the long
 soak, cold/warm, parallel TCP/UDP, DNS recovery, forced reconnect and a
 process-scoped Xray interruption. Both commands stay attached by default,
 render one stable progress line and print the final archive summary. --detach
@@ -73,7 +77,7 @@ running_pid() {
 
 latest_zip() {
   local result_dir="${1:-$DEFAULT_RESULTS}"
-  local matches=("$result_dir"/traffic-lab-results-*.zip)
+  local matches=("$result_dir"/traffic-lab*-results-*.zip)
   [[ -e "${matches[0]}" ]] || return 1
   ls -1t -- "${matches[@]}" 2>/dev/null | head -n 1
 }
@@ -231,12 +235,6 @@ command_start() {
   printf '%s\n' "$pid" >"$PID_FILE"
   chmod 600 "$PID_FILE"
   sleep 0.4
-  if ! process_matches "$pid"; then
-    echo 'Traffic Lab failed to start. Last log lines:' >&2
-    tail -n 30 "$log" >&2 || true
-    rm -f -- "$PID_FILE"
-    exit 1
-  fi
 
   printf 'Traffic Lab PID: %s\nLog: %s\nResults: %s\n' "$pid" "$log" "$outdir"
   if (( detach )); then
@@ -332,6 +330,7 @@ command_raw() {
 case "${1:-help}" in
   start) shift; command_start normal "$@" ;;
   extended) shift; command_start extended "$@" ;;
+  speed) shift; command_start speed "$@" ;;
   stop) shift; command_stop "$@" ;;
   status) shift; command_status "$@" ;;
   logs) shift; command_logs "$@" ;;

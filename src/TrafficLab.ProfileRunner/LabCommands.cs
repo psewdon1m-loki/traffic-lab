@@ -240,11 +240,11 @@ internal static class LabCommands
 
     private static void PrintHelp()
     {
-        Console.WriteLine("Loki Traffic Lab 3.1 - portable distributed black-box network laboratory");
+        Console.WriteLine("Loki Traffic Lab 3.4 - portable distributed black-box network laboratory");
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  run [--connections connections.txt] [--plan plan.json] [--xray xray.exe] [--outdir artifacts]");
-        Console.WriteLine("      [--test-type normal|extended] [--soak-seconds 300..900] [--parallel-flows 10..100] [--network-loss-seconds 3..15]");
+        Console.WriteLine("      [--test-type normal|extended|speed] [--soak-seconds 300..900] [--parallel-flows 10..100] [--network-loss-seconds 3..15]");
         Console.WriteLine("  run --stdin [--plan plan.json]  (safer ephemeral secret input)");
         Console.WriteLine("  plan --out plan.json --node-id ru-pc --network-label ru-ethernet --country RU --access ethernet");
         Console.WriteLine("  snapshot [--plan plan.json] [--outdir artifacts]");

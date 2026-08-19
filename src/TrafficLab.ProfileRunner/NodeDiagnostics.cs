@@ -348,45 +348,54 @@ internal static class NodeDiagnostics
 
     private static async Task<DirectPerformanceReport> ProbeDirectPerformanceAsync(TimeSpan timeout)
     {
-        using var client = CreateDirectClient();
-        var latency = new List<long>();
-        var errors = new List<string>();
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            var watch = Stopwatch.StartNew();
-            try
-            {
-                using var cancellation = new CancellationTokenSource(timeout);
-                using var response = await client.GetAsync("https://www.google.com/generate_204", HttpCompletionOption.ResponseHeadersRead, cancellation.Token);
-                watch.Stop();
-                if ((int)response.StatusCode is >= 200 and < 400) latency.Add(watch.ElapsedMilliseconds); else errors.Add($"latency HTTP {(int)response.StatusCode}");
-            }
-            catch (Exception ex) { errors.Add(ProgramAccess.Redact(ex.Message)); }
-        }
-
-        var downloadAttempts = new List<ThroughputSample>();
-        for (var attempt = 0; attempt < 3; attempt++)
-            downloadAttempts.Add(await MeasureDownloadAsync(client, timeout));
-        var successfulDownloads = downloadAttempts.Where(item => item.Success).ToArray();
-        var download = successfulDownloads.Length == 0
-            ? downloadAttempts.FirstOrDefault() ?? new ThroughputSample { Direction = "download" }
-            : successfulDownloads.OrderBy(item => item.PayloadTransferMegabitsPerSecond ?? item.EffectiveMegabitsPerSecond ?? 0).ElementAt(successfulDownloads.Length / 2);
-        var upload = await MeasureUploadAsync(client, timeout);
-        var effectiveRates = successfulDownloads.Select(item => item.EffectiveMegabitsPerSecond).Where(item => item.HasValue && item.Value > 0).Select(item => item!.Value).ToArray();
+        using var client = SpeedTestEngine.CreateDirectClient(timeout);
+        var detailed = await SpeedTestEngine.MeasureAsync(client, SpeedTestSettings.Normal, "direct");
+        var downloadSeries = detailed.Series.FirstOrDefault(item => item.Direction == "download" && item.Flows == 1);
+        var uploadSeries = detailed.Series.FirstOrDefault(item => item.Direction == "upload" && item.Flows == 1);
+        var downloadAttempts = ToLegacySamples(downloadSeries).ToArray();
+        var uploadAttempts = ToLegacySamples(uploadSeries).ToArray();
+        var download = Representative(downloadAttempts, "download");
+        var upload = Representative(uploadAttempts, "upload");
+        var effectiveRates = downloadAttempts.Select(item => item.EffectiveMegabitsPerSecond).Where(item => item.HasValue && item.Value > 0).Select(item => item!.Value).ToArray();
         return new DirectPerformanceReport
         {
-            Status = download.Success || upload.Success || latency.Count > 0 ? "observed" : "unavailable",
-            LatencyAttemptsMs = latency,
-            LatencyP50Ms = Percentile(latency, 0.5),
+            Status = download.Success || upload.Success || detailed.IdleLatency.Successful > 0 ? "observed" : "unavailable",
+            LatencyAttemptsMs = detailed.IdleLatency.SamplesMs,
+            LatencyP50Ms = detailed.IdleLatency.P50Ms,
             Download = download,
             DownloadAttempts = downloadAttempts,
             ColdDownload = downloadAttempts.FirstOrDefault(),
             WarmDownloads = downloadAttempts.Skip(1).ToArray(),
             DownloadEffectiveVariabilityRatio = effectiveRates.Length < 2 ? null : Math.Round(effectiveRates.Max() / effectiveRates.Min(), 2),
             Upload = upload,
-            Errors = errors,
-            Interpretation = "Download is the median of three bounded requests to one origin. The first request is labelled cold and the next two warm. Effective throughput includes DNS/connect/TLS/TTFB; payload-transfer throughput approximates bytes divided by time after first byte. Neither is a calibrated multi-stream line-rate speed test."
+            Errors = detailed.Series.SelectMany(item => item.ConfidenceReasons).Distinct().ToArray(),
+            DetailedSpeed = detailed,
+            Interpretation = "Adaptive calibration selects a payload for three steady-state attempts. The median payload rate is primary; effective rate, duration, byte-cap flags, loaded latency and variation bound confidence."
         };
+
+        static IReadOnlyList<ThroughputSample> ToLegacySamples(SpeedFlowSeries? series)
+            => series?.Attempts.Where(item => item.Role == "measurement").Select(item => new ThroughputSample
+            {
+                Direction = series.Direction,
+                Success = item.Success,
+                RequestedBytes = checked(item.RequestedBytesPerFlow * item.Flows),
+                TransferredBytes = item.TransferredBytes,
+                ElapsedMs = item.ElapsedMs,
+                FirstByteMs = item.PayloadElapsedMs.HasValue ? Math.Max(0, item.ElapsedMs - item.PayloadElapsedMs.Value) : null,
+                PayloadTransferMs = item.PayloadElapsedMs,
+                MegabitsPerSecond = item.EffectiveMbps,
+                EffectiveMegabitsPerSecond = item.EffectiveMbps,
+                PayloadTransferMegabitsPerSecond = item.PayloadMbps,
+                MetricKind = "adaptive-time-window-throughput",
+                Interpretation = "Compatibility projection of the adaptive speed measurement.",
+                Error = item.Error
+            }).ToArray() ?? [];
+
+        static ThroughputSample Representative(IReadOnlyList<ThroughputSample> samples, string direction)
+        {
+            var successful = samples.Where(item => item.Success).OrderBy(item => item.PayloadTransferMegabitsPerSecond ?? item.EffectiveMegabitsPerSecond ?? 0).ToArray();
+            return successful.Length > 0 ? successful[successful.Length / 2] : samples.FirstOrDefault() ?? new ThroughputSample { Direction = direction };
+        }
     }
 
     private static async Task<ThroughputSample> MeasureDownloadAsync(HttpClient client, TimeSpan timeout)
@@ -975,6 +984,7 @@ internal sealed class DirectPerformanceReport
     public IReadOnlyList<ThroughputSample> WarmDownloads { get; init; } = [];
     public double? DownloadEffectiveVariabilityRatio { get; init; }
     public ThroughputSample Upload { get; init; } = new();
+    public SpeedMeasurementReport? DetailedSpeed { get; init; }
     public IReadOnlyList<string> Errors { get; init; } = [];
     public string? Interpretation { get; init; }
 }

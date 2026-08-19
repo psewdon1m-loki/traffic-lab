@@ -695,3 +695,20 @@ internal sealed class SelfTestHttpHandler : HttpMessageHandler
         return new HttpResponseMessage(HttpStatusCode.NoContent) { RequestMessage = request };
     }
 }
+
+internal sealed class SpeedSelfTestHttpHandler : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await Task.Delay(5, cancellationToken);
+        if (request.RequestUri?.AbsolutePath.Contains("__down", StringComparison.Ordinal) == true)
+        {
+            var requested = request.RequestUri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+                .Select(item => item.Split('=', 2)).FirstOrDefault(item => item.Length == 2 && item[0] == "bytes")?[1];
+            var length = int.TryParse(requested, out var bytes) ? Math.Clamp(bytes, 0, 1024 * 1024) : 0;
+            return new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new ByteArrayContent(new byte[length]) };
+        }
+        if (request.Content is not null) await request.Content.CopyToAsync(Stream.Null, cancellationToken);
+        return new HttpResponseMessage(HttpStatusCode.NoContent) { RequestMessage = request };
+    }
+}

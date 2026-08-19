@@ -1,5 +1,6 @@
 artifacts/
 /test-artifacts/
+/.test-build/
 src/**/bin/
 src/**/obj/
 connections.txt

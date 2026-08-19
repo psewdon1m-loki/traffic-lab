@@ -147,6 +147,12 @@ internal static partial class Program
         }
 
         Directory.CreateDirectory(options.OutputDirectory);
+        if (options.IsSpeedTest)
+        {
+            return await RunSpeedOnlyAsync(input, options,
+                (percent, completed, message, state, zipPath) => ReportRunProgress(percent, completed, message, state, zipPath),
+                cancellationToken);
+        }
         var startedAt = DateTimeOffset.UtcNow;
         var runId = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)
             + "-" + Guid.NewGuid().ToString("N")[..8];
@@ -169,7 +175,7 @@ internal static partial class Program
             Tool = new ToolInfo
             {
                 Name = "Loki Traffic Lab Profile Runner",
-                Version = "3.3.0",
+                Version = "3.4.0",
                 XrayPath = Path.GetFileName(options.XrayPath),
                 XrayVersion = await ReadXrayVersionAsync(options.XrayPath, cancellationToken),
                 TimeoutSeconds = options.TimeoutSeconds,
@@ -700,12 +706,18 @@ internal static partial class Program
             }
 
             result.Stages.Add(await ProbeSocksDomainAsync(socksPort, options.Timeout).WaitAsync(cancellationToken));
-            result.Stages.Add(await ProbeDownloadAsync(proxyHttp, options.Timeout, cancellationToken));
+            using (var speedClient = SpeedTestEngine.CreateProxyClient(httpPort, options.Timeout))
+            {
+                profileProgress?.Invoke(76, "adaptive download/upload speed measurement");
+                var speed = await SpeedTestEngine.MeasureAsync(speedClient, SpeedTestSettings.Normal, "tunnel", cancellationToken);
+                result.Stages.Add(SpeedTestEngine.ToStage("tunnel.speed", speed));
+                result.Stages.Add(SpeedTestEngine.ToDirectionStage("tunnel.download", speed, "download"));
+                result.Stages.Add(SpeedTestEngine.ToDirectionStage("tunnel.upload", speed, "upload"));
+            }
             if (options.EnableExtendedTests)
             {
                 result.Stages.Add(await ExtendedDiagnostics.ProbeHttpProtocolMatrixAsync(proxyHttp, options.Timeout).WaitAsync(cancellationToken));
                 result.Stages.Add(await ExtendedDiagnostics.ProbeTunnelPayloadMatrixAsync(proxyHttp, options.Timeout).WaitAsync(cancellationToken));
-                result.Stages.Add(await ExtendedDiagnostics.ProbeUploadAsync(proxyHttp, options.Timeout).WaitAsync(cancellationToken));
             }
             if (!string.IsNullOrWhiteSpace(options.CanaryUrlTemplate))
             {
@@ -726,6 +738,22 @@ internal static partial class Program
             profileProgress?.Invoke(90, "UDP, STUN and QUIC checked");
             if (options.IsExtendedTest)
             {
+                profileProgress?.Invoke(90, "extended: matched direct/tunnel multi-flow speed matrix");
+                using var directSpeedBeforeClient = SpeedTestEngine.CreateDirectClient(options.Timeout);
+                var directSpeedBefore = await SpeedTestEngine.MeasureAsync(directSpeedBeforeClient, SpeedTestSettings.Extended, "direct-before", cancellationToken);
+                using var tunnelSpeedClient = SpeedTestEngine.CreateProxyClient(httpPort, options.Timeout);
+                var tunnelSpeed = await SpeedTestEngine.MeasureAsync(tunnelSpeedClient, SpeedTestSettings.Extended, "tunnel", cancellationToken);
+                using var directSpeedAfterClient = SpeedTestEngine.CreateDirectClient(options.Timeout);
+                var directSpeedAfter = await SpeedTestEngine.MeasureAsync(directSpeedAfterClient, SpeedTestSettings.DirectAfterControl, "direct-after-control", cancellationToken);
+                var speedComparison = SpeedTestEngine.Compare(directSpeedBefore, tunnelSpeed, directSpeedAfter);
+                result.Stages.Add(StageResult.FromStatus(
+                    "tunnel.extended.speedMatrix",
+                    tunnelSpeed.Series.Any(item => item.SuccessfulAttempts > 0) ? speedComparison.DirectControlStable ? "passed" : "partial" : "failed",
+                    directSpeedBefore.DurationMs + tunnelSpeed.DurationMs + directSpeedAfter.DurationMs,
+                    new { directBefore = directSpeedBefore, tunnel = tunnelSpeed, directAfter = directSpeedAfter, comparison = speedComparison },
+                    tunnelSpeed.Series.Any(item => item.SuccessfulAttempts > 0)
+                        ? speedComparison.DirectControlStable ? null : "Direct controls drifted by more than 25%; tunnel efficiency is low-confidence."
+                        : "No tunneled extended speed series succeeded."));
                 result.Stages.AddRange(await RunExtendedSuiteAsync(
                     profile, options, httpPort, socksPort, xray?.Id ?? 0, proxyHttp, profileProgress, cancellationToken));
             }
@@ -812,12 +840,12 @@ internal static partial class Program
     {
         var names = new List<string>
         {
-            "tunnel.dnsViaSocks", "tunnel.download", "tunnel.controlledCanary", "tunnel.stability", "tunnel.udp"
+            "tunnel.dnsViaSocks", "tunnel.speed", "tunnel.download", "tunnel.upload", "tunnel.controlledCanary", "tunnel.stability", "tunnel.udp"
         };
         if (options.EnableExtendedTests)
-            names.AddRange(["tunnel.httpProtocols", "tunnel.payloadMatrix", "tunnel.upload", "tunnel.stun", "tunnel.quicHandshake"]);
+            names.AddRange(["tunnel.httpProtocols", "tunnel.payloadMatrix", "tunnel.stun", "tunnel.quicHandshake"]);
         if (options.IsExtendedTest)
-            names.AddRange(["tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp", "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.networkInterruption"]);
+            names.AddRange(["tunnel.extended.speedMatrix", "tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp", "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.networkInterruption"]);
         else
             names.Add("tunnel.extendedSuite");
         foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
@@ -2858,7 +2886,7 @@ internal static partial class Program
             ExtendedTest = new ExtendedTestMetadata { Enabled = true, Elevated = false, SoakDurationSeconds = 300, ParallelFlows = 20, NetworkLossSeconds = 5 },
             NetworkLabel = "self-test",
             TestContext = new TestContext { NodeId = "self-test-pc" },
-            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.3.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
+            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.4.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
             Input = new InputSummary { LoadedConnections = 1, ScheduledConnections = 1 },
             Environment = new NetworkEnvironment()
         };
@@ -2880,6 +2908,60 @@ internal static partial class Program
         var extendedOptions = RunnerOptions.Parse(["--test-type", "extended", "--soak-seconds", "300", "--parallel-flows", "100", "--network-loss-seconds", "5"]);
         Assert(extendedOptions.IsExtendedTest && extendedOptions.ParallelFlows == 100 && extendedOptions.SoakDurationSeconds == 300,
             "Extended runner options were not parsed correctly.");
+        var speedOptions = RunnerOptions.Parse(["--test-type", "speed"]);
+        Assert(speedOptions.IsSpeedTest && !speedOptions.IsExtendedTest, "Speed-only runner option was not parsed correctly.");
+        var comparison = SpeedTestEngine.Compare(
+            new SpeedMeasurementReport { Series = [new SpeedFlowSeries { Direction = "download", Flows = 1, RecommendedMbps = 100, SuccessfulAttempts = 3 }] },
+            new SpeedMeasurementReport { Series = [new SpeedFlowSeries { Direction = "download", Flows = 1, RecommendedMbps = 80, SuccessfulAttempts = 3 }] },
+            new SpeedMeasurementReport { Series = [new SpeedFlowSeries { Direction = "download", Flows = 1, RecommendedMbps = 110, SuccessfulAttempts = 3 }] });
+        Assert(comparison.DirectControlStable && comparison.Rows.Count == 1
+            && comparison.Rows[0].TunnelEfficiencyPercent is > 75 and < 77,
+            "Matched speed comparison or direct-control drift classification is incorrect.");
+        try
+        {
+            using var speedClient = new HttpClient(new SpeedSelfTestHttpHandler()) { Timeout = TimeSpan.FromSeconds(10) };
+            var speedReport = SpeedTestEngine.MeasureAsync(speedClient,
+                new SpeedTestSettings("self-test", 10, 2, [1], 512 * 1024, 256 * 1024, 5),
+                "self-test", CancellationToken.None).GetAwaiter().GetResult();
+            Assert(speedReport.Series.Count == 2
+                && speedReport.Series.All(item => item.SuccessfulAttempts == 2)
+                && speedReport.Series.All(item => item.Attempts.First().Role == "calibration")
+                && speedReport.Series.All(item => item.Attempts.Count == 3),
+                "Adaptive speed engine did not retain calibration plus successful measurement attempts.");
+        }
+        catch (Exception ex)
+        {
+            Assert(false, "Adaptive speed engine self-test failed: " + ex.GetType().Name + ": " + ex.Message);
+        }
+        var speedPackageRoot = Path.Combine(Path.GetTempPath(), "traffic-lab-speed-package-selftest-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var speedDocument = new SpeedOnlyRunDocument
+            {
+                Run = new SpeedOnlyRunMetadata
+                {
+                    RunId = "speed-selftest-12345678", StartedAt = DateTimeOffset.UtcNow,
+                    CompletedAt = DateTimeOffset.UtcNow, DurationMs = 1, Platform = expectedPlatform,
+                    OperatingSystem = RuntimeInformation.OSDescription, ToolVersion = "3.4.0", Connections = 1
+                },
+                Outcome = new OutcomeDecision { Outcome = OutcomeClassifier.Pass, ReasonCode = "SELF_TEST", Reason = "Package contract check." },
+                Profiles = [new SpeedOnlyProfileResult { ProfileId = "profile-01", Ordinal = 1, Name = "self-test" }]
+            };
+            var speedPackage = CreateSpeedOnlyPackageAsync(speedDocument, speedPackageRoot, CancellationToken.None).GetAwaiter().GetResult();
+            using var speedArchive = ZipFile.OpenRead(speedPackage);
+            Assert(speedArchive.Entries.Count == 2
+                && speedArchive.GetEntry("speed.json") is not null
+                && speedArchive.GetEntry("readme.txt") is not null,
+                "Speed-only archive must contain exactly speed.json and readme.txt.");
+        }
+        catch (Exception ex)
+        {
+            Assert(false, "Speed-only package self-test failed: " + ex.GetType().Name + ": " + ex.Message);
+        }
+        finally
+        {
+            try { if (Directory.Exists(speedPackageRoot)) Directory.Delete(speedPackageRoot, recursive: true); } catch { }
+        }
         var soakStage = BuildSoakStage([
             new SoakObservation(1, DateTimeOffset.UtcNow, true, 10, 204, null),
             new SoakObservation(2, DateTimeOffset.UtcNow, true, 20, 204, null),
@@ -3061,6 +3143,7 @@ internal sealed class RunnerOptions
     public string? ProgressFilePath { get; init; }
     [JsonIgnore] public TimeSpan Timeout => TimeSpan.FromSeconds(Math.Clamp(TimeoutSeconds, 3, 120));
     [JsonIgnore] public bool IsExtendedTest => TestType.Equals("extended", StringComparison.OrdinalIgnoreCase);
+    [JsonIgnore] public bool IsSpeedTest => TestType.Equals("speed", StringComparison.OrdinalIgnoreCase);
 
     public static RunnerOptions Parse(string[] args)
     {
@@ -3085,8 +3168,8 @@ internal sealed class RunnerOptions
         var xray = Read("--xray") ?? (File.Exists(adjacentXray) ? adjacentXray : xrayFileName);
         var connectionFile = Read("--connections") ?? Path.Combine(executableDirectory, "connections.txt");
         var requestedTestType = Read("--test-type")?.Trim().ToLowerInvariant();
-        if (requestedTestType is not null && requestedTestType is not ("normal" or "extended"))
-            throw new ArgumentException("--test-type must be normal or extended.");
+        if (requestedTestType is not null && requestedTestType is not ("normal" or "extended" or "speed"))
+            throw new ArgumentException("--test-type must be normal, extended, or speed.");
         return new RunnerOptions
         {
             ReadStdin = args.Contains("--stdin", StringComparer.OrdinalIgnoreCase),
