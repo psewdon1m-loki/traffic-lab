@@ -26,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.4.0.apk
+  Apk\releases\LokiTrafficLab-android-3.5.0.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -70,26 +70,31 @@ Google/Cloudflare DoH, direct UDP DNS, resolver comparison, repeated TCP,
 TLS/REALITY fallback and SNI/certificate/SPKI matrix, plain WebSocket upgrade,
 RIPEstat ASN/BGP and IP-geolocation hints, Android ping-TTL path evidence,
 embedded Xray validation/start, authenticated HTTP, exit-IP comparison, SOCKS
-remote-domain DNS, one calibration plus three adaptive download/upload
+remote-domain DNS, discarded warm-up plus robust calibration and bounded-window download/upload
 measurement samples and payload matrix, stability, real
 SOCKS5 UDP DNS, tunneled STUN mapping, invalid UUID/shortId/SNI controls, explicit XUDP A/B testing,
 classified core logs, shared-backend grouping, infrastructure signals and OSI mapping.
 
-Normal throughput uses one bounded calibration sample and three adaptively sized samples.
-It reports a median payload rate separately from effective request rate, setup/
-TTFB, sample spread and confidence. The calibration result chooses the bounded
-payload size but is excluded from the recommended median. Download payload time begins after response
-headers; upload payload time ends only when the speed endpoint acknowledges the
-request. A failed sample or high variation is retained as PARTIAL instead of
-being hidden behind a single Mbps number. The first request asks for a closed
-connection and later requests permit keep-alive reuse; connection reuse remains
-an explicit client-side request rather than an unprovable server-side fact.
+Normal throughput discards a warm-up, uses repeated calibration and synchronized
+workers, and records robust window and batch-completion rates separately.
+A failed sample, straggler or high variation is retained instead of being hidden
+behind a single Mbps number.
 Upload payload is generated as an incompressible stream through a 64 KiB buffer,
 so larger adaptive samples do not allocate a same-sized byte array. SPEED and
 extended matrices add 1/4/16 simultaneous flows, idle/loaded latency,
 p10/median/p90, coefficient of variation, byte-cap flags and matched direct
-controls before/after the tunnel. Client CPU/heap context is retained. Direct
-drift above 25% lowers confidence.
+controls in an ABBA Direct-Tunnel-Tunnel-Direct sequence with the same workload
+plan. Client CPU/heap context is retained. Same-flow drift above 15%, stragglers,
+endpoint instability and concurrency collapse lower confidence. Only SPEED shows
+the final Download/Upload result in the Android interface.
+Android uses payload-transfer duration separately from cold total duration and
+normalizes public Cloudflare request sizes away from rejected ranges. HTTP
+403/429 is retained as ENDPOINT_REQUEST_REJECTED/ENDPOINT_RATE_LIMITED and is
+not treated as proof of a proxy fault.
+Separate Cloudflare and OVH SBG/RBX/BHS 1 MiB controls expose endpoint/peering
+bias without averaging geographically different paths into the primary result.
+Completed uploads use full server-acknowledged request duration and are labelled
+UPLOAD_ACK_BOUNDED_ESTIMATE (at most medium confidence without server timing).
 
 The Xray log classifier labels readiness EOF, completed UDP-association teardown
 and loopback broken-pipe/reset caused by a completed or timed-out app probe as

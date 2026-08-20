@@ -69,11 +69,10 @@ final class TrafficLabRunner {
         List<String> directAddresses = ProbeSuite.validExitAddresses(directExit);
         JSONArray directAttribution = ProbeSuite.attribution(directAddresses);
         JSONObject directStun = ProbeSuite.directStun();
-        JSONObject directPerformance = ProbeSuite.directPerformance(null);
+        JSONObject directPerformance = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.NORMAL, this::checkCanceled);
         enrichNode(node, directExit, directAttribution, directStun, directPerformance);
         boolean directControlAvailable = ProbeSuite.anyValidExit(directExit)
-                || directPerformance.optJSONObject("download") != null && directPerformance.optJSONObject("download").optInt("successfulAttempts") > 0
-                || directPerformance.optJSONObject("upload") != null && directPerformance.optJSONObject("upload").optInt("successfulAttempts") > 0;
+                || !"failed".equals(directPerformance.optString("status"));
         report(15, 0, connections.size(), "Direct network baseline captured");
 
         List<ProfileResult> profiles = new ArrayList<>();
@@ -110,6 +109,7 @@ final class TrafficLabRunner {
         report(4, 0, connections.size(), "Capturing Android network context for speed test");
         JSONObject node = AndroidNetworkDiagnostics.capture(context);
         List<ProfileResult> profiles = new ArrayList<>();
+        JSONArray speedSummaries = new JSONArray();
         boolean anyDirectControl = false;
         for (int index = 0; index < connections.size(); index++) {
             checkCanceled(); int ordinal = index + 1;
@@ -133,6 +133,7 @@ final class TrafficLabRunner {
 
             report(startPercent + (endPercent - startPercent) * 5 / 100, index, connections.size(), profileId + ": direct speed control before tunnel");
             JSONObject directBefore = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.SPEED, this::checkCanceled);
+            JSONObject matchedPlan = AndroidSpeedTestEngine.createPlan(directBefore);
             boolean directAvailable = !"failed".equals(directBefore.optString("status")); anyDirectControl |= directAvailable;
             stages.put(speedStage("speed.directBefore", directBefore, false));
 
@@ -151,8 +152,12 @@ final class TrafficLabRunner {
                             ? JsonUtil.passed("tunnel.authenticatedEndToEnd", http.optLong("elapsedMs"), JsonUtil.object("protocol", "vless", "speedPrerequisite", true))
                             : JsonUtil.failed("tunnel.authenticatedEndToEnd", http.optLong("elapsedMs"), "No authenticated control request completed before speed measurement.", http));
                     if (authenticated) {
-                        report(startPercent + (endPercent - startPercent) * 45 / 100, index, connections.size(), profileId + ": tunnel 1/4/16-flow speed matrix");
-                        tunnelSpeed = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.SPEED, this::checkCanceled);
+                        report(startPercent + (endPercent - startPercent) * 45 / 100, index, connections.size(), profileId + ": ABBA tunnel leg 1/2");
+                        JSONObject tunnelFirst = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.SPEED, matchedPlan, this::checkCanceled);
+                        report(startPercent + (endPercent - startPercent) * 62 / 100, index, connections.size(), profileId + ": ABBA tunnel leg 2/2");
+                        JSONObject tunnelSecond = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.SPEED, matchedPlan, this::checkCanceled);
+                        tunnelSpeed = AndroidSpeedTestEngine.combine(tunnelFirst, tunnelSecond);
+                        JsonUtil.put(tunnelSpeed, "abbaPasses", new JSONArray().put(tunnelFirst).put(tunnelSecond));
                         stages.put(speedStage("speed.tunnel", tunnelSpeed, true));
                     } else stages.put(JsonUtil.skipped("speed.tunnel", "Authenticated tunnel prerequisite failed."));
                 } catch (Exception error) {
@@ -168,7 +173,7 @@ final class TrafficLabRunner {
             }
 
             report(startPercent + (endPercent - startPercent) * 78 / 100, index, connections.size(), profileId + ": direct speed control after tunnel");
-            JSONObject directAfter = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.CONTROL, this::checkCanceled);
+            JSONObject directAfter = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.SPEED, matchedPlan, this::checkCanceled);
             directAvailable |= !"failed".equals(directAfter.optString("status"));
             anyDirectControl |= directAvailable;
             stages.put(speedStage("speed.directAfter", directAfter, false));
@@ -187,6 +192,10 @@ final class TrafficLabRunner {
                     : "failed".equals(tunnelSpeed.optString("status"))
                     ? speedDecision("UNKNOWN", "SPEED_MEASUREMENT_INCONCLUSIVE", "Authentication succeeded but no tunnel speed series completed.")
                     : speedDecision("PASS", "SPEED_MEASUREMENT_SUCCEEDED", "Matched direct and authenticated tunnel speed measurements completed.");
+            if (authenticated && !"failed".equals(tunnelSpeed.optString("status"))) {
+                JSONObject summary = AndroidSpeedTestEngine.summary(tunnelSpeed);
+                JsonUtil.put(summary, "profileId", profileId); JsonUtil.put(summary, "name", profile.name); speedSummaries.put(summary);
+            }
             profiles.add(new ProfileResult(profileId, ordinal, profile.name, profile.fingerprint(), profile.declared(), dns.addresses,
                     Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(), stages,
                     new JSONArray(), new JSONArray(), authenticated, outcome));
@@ -201,12 +210,14 @@ final class TrafficLabRunner {
         JSONObject runOutcome = allTestFailure
                 ? speedDecision("TEST_FAILURE", "ALL_PROFILES_TEST_FAILURE", "Every connection was rejected before a fair speed-path measurement could start.")
                 : AndroidOutcomeClassifier.run(outcomes, anyDirectControl);
+        JsonUtil.put(runOutcome, "speedSummary", speedSummaries);
         ResultPackager.PackageInput input = new ResultPackager.PackageInput(runId, startedAt, completedAt, durationMs,
                 xray.version(), node, new JSONArray(), new JSONArray(), profiles, testType, runOutcome);
         report(97, profiles.size(), profiles.size(), "Creating speed.json and readme.txt");
         File zip = ResultPackager.create(context, input);
         report(100, profiles.size(), profiles.size(), "Speed testing completed: " + runOutcome.optString("outcome", "UNKNOWN"));
-        return new RunResult(zip, profiles.size(), durationMs, usable, startedAt, completedAt, testType, runOutcome);
+        return new RunResult(zip, profiles.size(), durationMs, usable, startedAt, completedAt, testType, runOutcome,
+                formatSpeedSummaries(speedSummaries));
     }
 
     private static JSONObject speedStage(String name, JSONObject report, boolean proxyPath) {
@@ -217,9 +228,36 @@ final class TrafficLabRunner {
                 : JsonUtil.failed(name, elapsedMs, reason, report);
     }
 
+    private static JSONObject speedDirectionStage(String name, JSONObject report, String direction) {
+        JSONArray selected = new JSONArray(); JSONArray series = report.optJSONArray("series");
+        if (series != null) for (int index = 0; index < series.length(); index++) {
+            JSONObject item = series.optJSONObject(index);
+            if (item != null && direction.equals(item.optString("direction"))) selected.put(item);
+        }
+        JSONObject summary = AndroidSpeedTestEngine.summary(report);
+        Object recommended = "download".equals(direction) ? summary.opt("downloadMbps") : summary.opt("uploadMbps");
+        JSONObject data = JsonUtil.object("direction", direction, "recommendedMbps", recommended,
+                "series", selected, "measurementVersion", report.optInt("measurementVersion"), "method", report.optString("method"));
+        return selected.length() > 0 ? JsonUtil.passed(name, report.optLong("elapsedMs"), data)
+                : JsonUtil.failed(name, report.optLong("elapsedMs"), "No usable " + direction + " speed series completed.", data);
+    }
+
     private static JSONObject speedDecision(String outcome, String reasonCode, String reason) {
         return JsonUtil.object("outcome", outcome, "reasonCode", reasonCode, "reason", reason,
                 "evidence", new JSONArray().put("speed.directBefore").put("speed.tunnel").put("speed.directAfter"));
+    }
+
+    private static String formatSpeedSummaries(JSONArray summaries) {
+        if (summaries == null || summaries.length() == 0) return null;
+        List<String> rows = new ArrayList<>();
+        for (int index = 0; index < summaries.length(); index++) {
+            JSONObject value = summaries.optJSONObject(index); if (value == null) continue;
+            rows.add(value.optString("name", value.optString("profileId", "profile")) + ": Download "
+                    + String.format(Locale.ROOT, "%.2f", value.optDouble("downloadMbps")) + " Mbit/s · Upload "
+                    + String.format(Locale.ROOT, "%.2f", value.optDouble("uploadMbps")) + " Mbit/s · confidence="
+                    + value.optString("confidence", "unknown"));
+        }
+        return rows.isEmpty() ? null : String.join(" | ", rows);
     }
 
     private ProfileResult runProfile(String raw, int ordinal, JSONArray directExit, boolean directControlAvailable, Integer activeMtu, ProgressListener listener, TestType testType) throws Exception {
@@ -326,9 +364,10 @@ final class TrafficLabRunner {
 
             if (usable) {
                 stages.put(ProbeSuite.socksDomain(session.socksPort));
-                JSONObject performance = ProbeSuite.directPerformance(httpProxy);
-                stages.put(ProbeSuite.performanceStage("tunnel.download", performance, "download"));
-                stages.put(ProbeSuite.performanceStage("tunnel.upload", performance, "upload"));
+                JSONObject performance = AndroidSpeedTestEngine.measure(httpProxy, AndroidSpeedTestEngine.Mode.NORMAL, this::checkCanceled);
+                stages.put(speedStage("tunnel.speed", performance, true));
+                stages.put(speedDirectionStage("tunnel.download", performance, "download"));
+                stages.put(speedDirectionStage("tunnel.upload", performance, "upload"));
                 stages.put(JsonUtil.unsupported("tunnel.httpProtocols", "Android HttpURLConnection does not expose the negotiated HTTP version consistently; TLS ALPN is recorded separately.", null));
                 stages.put(payloadMatrix(httpProxy));
                 stages.put(JsonUtil.skipped("tunnel.controlledCanary", "No authorized controlled collector URL is configured in the Android UI."));
@@ -608,9 +647,13 @@ final class TrafficLabRunner {
     }
 
     static final class RunResult {
-        final File zip; final int profileCount; final long durationMs; final boolean usable; final String startedAt; final String completedAt; final TestType testType; final JSONObject outcome;
+        final File zip; final int profileCount; final long durationMs; final boolean usable; final String startedAt; final String completedAt; final TestType testType; final JSONObject outcome; final String speedResult;
         RunResult(File zip, int profileCount, long durationMs, boolean usable, String startedAt, String completedAt, TestType testType, JSONObject outcome) {
+            this(zip, profileCount, durationMs, usable, startedAt, completedAt, testType, outcome, null);
+        }
+        RunResult(File zip, int profileCount, long durationMs, boolean usable, String startedAt, String completedAt, TestType testType, JSONObject outcome, String speedResult) {
             this.zip = zip; this.profileCount = profileCount; this.durationMs = durationMs; this.usable = usable; this.startedAt = startedAt; this.completedAt = completedAt; this.testType = testType; this.outcome = outcome;
+            this.speedResult = speedResult;
         }
     }
 }

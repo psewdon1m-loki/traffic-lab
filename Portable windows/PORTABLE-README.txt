@@ -1,4 +1,4 @@
-Loki Traffic Lab Portable 3.4.0
+Loki Traffic Lab Portable 3.5.0
 ==============================
 
 Results preserve status and add causal outcome/reason fields at stage, profile
@@ -42,16 +42,22 @@ Firewall window are labelled expected/induced. UDP closed-pipe and association
 EOF teardown messages are labelled benign lifecycle events. Only genuinely
 unexpected markers can downgrade tunnel.logs to partial.
 
-Speed reports use incompressible streaming upload with a bounded 64 KiB buffer,
-discard downloaded bodies, separate effective request rate from post-first-byte
-payload rate, exclude calibration from the median and adapt payload sizes toward
-a sustained time window. Raw attempts, p10/median/p90, coefficient of variation,
-byte-cap flags and idle/loaded latency are retained. EXTENDED and SPEED modes add
-bounded client CPU/memory context, 1/4/16-flow capacity and matched direct controls; drift above 25% lowers
-confidence. No value is described as a calibrated ISP line rate.
-SPEED TEST asks for confirmation because its worst-case byte budget is roughly
-700 MiB per profile. The full direct-before and tunnel matrices use 1/4/16
-flows; the direct-after drift control is intentionally reduced to one flow.
+Speed reports use incompressible streaming upload with bounded 64 KiB buffers,
+discard bodies, exclude warm-up/calibration and synchronize parallel workers.
+Raw windows, p10/median/p90, variation, byte-cap flags, idle/loaded latency and
+STRAGGLER/CONCURRENCY/ENDPOINT classifications are retained. EXTENDED and SPEED
+use a matched Direct-Tunnel-Tunnel-Direct sequence with full 1/4/16-flow controls;
+same-flow drift above 15% lowers confidence. Only SPEED shows Download/Upload in
+the UI after completion. Its theoretical cap is about 3.5 GiB per profile;
+typical use is lower and memory remains bounded.
+The bounded clock begins with the first payload byte; cold DNS/TCP/TLS/TTFB is
+still recorded but cannot consume the sustained-transfer window. Public-edge
+HTTP 403/429 is labelled ENDPOINT_REQUEST_REJECTED/ENDPOINT_RATE_LIMITED and is
+not treated as proof of a proxy fault.
+Cloudflare and OVH SBG/RBX/BHS 1 MiB controls are retained separately to reveal
+CDN/peering bias and are never averaged into the matched primary Mbps value.
+Completed uploads use full server-acknowledged request duration and are labelled
+UPLOAD_ACK_BOUNDED_ESTIMATE (at most medium confidence without server timing).
 
 1. Put one complete VLESS URI per line in connections.txt. Blank lines and
    lines beginning with #, ; or // are ignored. Lines are tested in order.

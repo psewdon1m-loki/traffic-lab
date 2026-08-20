@@ -82,8 +82,11 @@ public final class TrafficLabService extends Service {
             try {
                 TrafficLabRunner.RunResult result = runner.run(copy, selectedType);
                 copy.clear();
+                String completedMessage = selectedType.value + " testing completed: " + result.outcome.optString("outcome", "UNKNOWN");
+                if (selectedType.speed() && result.speedResult != null && !result.speedResult.isEmpty())
+                    completedMessage += "\n" + result.speedResult;
                 update(new State("completed", 100, result.profileCount, result.profileCount,
-                        selectedType.value + " testing completed: " + result.outcome.optString("outcome", "UNKNOWN"),
+                        completedMessage,
                         started, result.durationMs, result.zip, result.usable, result.testType,
                         result.outcome.optString("outcome", "UNKNOWN"), result.outcome.optString("reasonCode", "RUN_INCONCLUSIVE"), result.outcome.optString("reason", "No causal classification was available.")));
             } catch (InterruptedException error) {

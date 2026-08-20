@@ -1,7 +1,10 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.IO.Compression;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
@@ -58,7 +61,7 @@ internal sealed class TrafficLabForm : Form
     public TrafficLabForm(bool autoStartExtended = false)
     {
         connectionFile = Path.Combine(baseDirectory, "connections.txt");
-        Text = "Loki Traffic Lab Portable 3.4.0";
+        Text = "Loki Traffic Lab Portable 3.5.0";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(820, 430);
         Size = new Size(900, 500);
@@ -194,7 +197,7 @@ internal sealed class TrafficLabForm : Form
     private async void SpeedClicked(object? sender, EventArgs e)
     {
         var consent = MessageBox.Show(this,
-            "SPEED TEST запускает download/upload через direct и VLESS-пути с 1, 4 и 16 потоками. Тест может занять несколько минут и в худшем случае использовать около 700 МБ трафика на одно подключение. Продолжить?",
+            "SPEED TEST запускает точный ABBA-прогон Direct-Tunnel-Tunnel-Direct с 1, 4 и 16 потоками. Тест может занять несколько минут и при достижении всех лимитов использовать до 3,5 ГБ трафика на подключение. Продолжить?",
             "Тест скорости", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2);
         if (consent == DialogResult.Yes) await StartTestAsync("speed");
     }
@@ -269,7 +272,7 @@ internal sealed class TrafficLabForm : Form
         details.Clear();
         progress.Value = 1;
         observedProgress = 1;
-        expectedSeconds = 25 + (extended ? 560 : speedOnly ? 210 : 95) * profileCount;
+        expectedSeconds = 25 + (extended ? 650 : speedOnly ? 420 : 110) * profileCount;
         elapsed.Restart();
         timer.Start();
         statusLabel.Text = extended ? "Расширенный тест: сбор характеристик локальной машины…"
@@ -337,6 +340,15 @@ internal sealed class TrafficLabForm : Form
             var completedKind = currentRunTestType switch { "extended" => "Расширенный тест", "speed" => "Тест скорости", _ => "Обычный тест" };
             statusLabel.Text = $"{completedKind} завершён. Итоговый архив: {sizeMb:F2} МБ";
             timeLabel.Text = $"Прошло: {FormatTime(elapsed.Elapsed)} · осталось: 00:00";
+            if (string.Equals(currentRunTestType, "speed", StringComparison.OrdinalIgnoreCase))
+            {
+                var speedSummary = TryReadSpeedSummary(resultZip);
+                if (!string.IsNullOrWhiteSpace(speedSummary))
+                {
+                    statusLabel.Text += " · " + speedSummary;
+                    AppendDetails("SPEED RESULT: " + speedSummary);
+                }
+            }
             saveButton.Enabled = true;
             openFolderButton.Enabled = true;
             MessageBox.Show(this, "Тестирование завершено. Нажмите «Сохранить ZIP в Загрузки».", "Traffic Lab", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -413,6 +425,32 @@ internal sealed class TrafficLabForm : Form
         progress.Value = Math.Clamp(Math.Max(observedProgress, timeBased), 1, 95);
         var remaining = TimeSpan.FromSeconds(Math.Max(0, expectedSeconds - elapsed.Elapsed.TotalSeconds));
         timeLabel.Text = $"Прошло: {FormatTime(elapsed.Elapsed)} · примерно осталось: {FormatTime(remaining)}";
+    }
+
+    private static string? TryReadSpeedSummary(string archivePath)
+    {
+        try
+        {
+            using var archive = ZipFile.OpenRead(archivePath);
+            var entry = archive.GetEntry("speed.json");
+            if (entry is null) return null;
+            using var stream = entry.Open();
+            using var document = JsonDocument.Parse(stream);
+            if (!document.RootElement.TryGetProperty("summary", out var summaries) || summaries.ValueKind != JsonValueKind.Array)
+                return null;
+            var rows = new List<string>();
+            foreach (var item in summaries.EnumerateArray())
+            {
+                var name = item.TryGetProperty("name", out var nameValue) ? nameValue.GetString() : "profile";
+                var download = item.TryGetProperty("downloadMbps", out var downValue) && downValue.ValueKind == JsonValueKind.Number
+                    ? downValue.GetDouble().ToString("F2", CultureInfo.InvariantCulture) : "n/a";
+                var upload = item.TryGetProperty("uploadMbps", out var upValue) && upValue.ValueKind == JsonValueKind.Number
+                    ? upValue.GetDouble().ToString("F2", CultureInfo.InvariantCulture) : "n/a";
+                rows.Add($"{name}: Download {download} Mbit/s · Upload {upload} Mbit/s");
+            }
+            return rows.Count == 0 ? null : string.Join(" | ", rows);
+        }
+        catch { return null; }
     }
 
     private async void SaveClicked(object? sender, EventArgs e)

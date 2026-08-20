@@ -175,7 +175,7 @@ internal static partial class Program
             Tool = new ToolInfo
             {
                 Name = "Loki Traffic Lab Profile Runner",
-                Version = "3.4.0",
+                Version = "3.5.0",
                 XrayPath = Path.GetFileName(options.XrayPath),
                 XrayVersion = await ReadXrayVersionAsync(options.XrayPath, cancellationToken),
                 TimeoutSeconds = options.TimeoutSeconds,
@@ -741,18 +741,21 @@ internal static partial class Program
                 profileProgress?.Invoke(90, "extended: matched direct/tunnel multi-flow speed matrix");
                 using var directSpeedBeforeClient = SpeedTestEngine.CreateDirectClient(options.Timeout);
                 var directSpeedBefore = await SpeedTestEngine.MeasureAsync(directSpeedBeforeClient, SpeedTestSettings.Extended, "direct-before", cancellationToken);
+                var matchedSpeedPlan = SpeedTestEngine.CreateMatchedPlan(directSpeedBefore);
                 using var tunnelSpeedClient = SpeedTestEngine.CreateProxyClient(httpPort, options.Timeout);
-                var tunnelSpeed = await SpeedTestEngine.MeasureAsync(tunnelSpeedClient, SpeedTestSettings.Extended, "tunnel", cancellationToken);
+                var tunnelSpeedFirst = await SpeedTestEngine.MeasureAsync(tunnelSpeedClient, SpeedTestSettings.Extended, "tunnel-first", cancellationToken, matchedSpeedPlan);
+                var tunnelSpeedSecond = await SpeedTestEngine.MeasureAsync(tunnelSpeedClient, SpeedTestSettings.Extended, "tunnel-second", cancellationToken, matchedSpeedPlan);
+                var tunnelSpeed = SpeedTestEngine.CombineReports("tunnel-abba-combined", tunnelSpeedFirst, tunnelSpeedSecond);
                 using var directSpeedAfterClient = SpeedTestEngine.CreateDirectClient(options.Timeout);
-                var directSpeedAfter = await SpeedTestEngine.MeasureAsync(directSpeedAfterClient, SpeedTestSettings.DirectAfterControl, "direct-after-control", cancellationToken);
+                var directSpeedAfter = await SpeedTestEngine.MeasureAsync(directSpeedAfterClient, SpeedTestSettings.Extended, "direct-after", cancellationToken, matchedSpeedPlan);
                 var speedComparison = SpeedTestEngine.Compare(directSpeedBefore, tunnelSpeed, directSpeedAfter);
                 result.Stages.Add(StageResult.FromStatus(
                     "tunnel.extended.speedMatrix",
                     tunnelSpeed.Series.Any(item => item.SuccessfulAttempts > 0) ? speedComparison.DirectControlStable ? "passed" : "partial" : "failed",
                     directSpeedBefore.DurationMs + tunnelSpeed.DurationMs + directSpeedAfter.DurationMs,
-                    new { directBefore = directSpeedBefore, tunnel = tunnelSpeed, directAfter = directSpeedAfter, comparison = speedComparison },
+                    new { sequence = "Direct-Tunnel-Tunnel-Direct", matchedPlan = matchedSpeedPlan.Workloads, directBefore = directSpeedBefore, tunnelPasses = new[] { tunnelSpeedFirst, tunnelSpeedSecond }, tunnel = tunnelSpeed, directAfter = directSpeedAfter, comparison = speedComparison },
                     tunnelSpeed.Series.Any(item => item.SuccessfulAttempts > 0)
-                        ? speedComparison.DirectControlStable ? null : "Direct controls drifted by more than 25%; tunnel efficiency is low-confidence."
+                        ? speedComparison.DirectControlStable ? null : "Same-flow direct controls drifted by more than 15% or were anomalous; tunnel efficiency is low-confidence."
                         : "No tunneled extended speed series succeeded."));
                 result.Stages.AddRange(await RunExtendedSuiteAsync(
                     profile, options, httpPort, socksPort, xray?.Id ?? 0, proxyHttp, profileProgress, cancellationToken));
@@ -2732,10 +2735,10 @@ internal static partial class Program
                 "tunnel.http" => $"{data.EnumerateArray().Count(item => item.GetProperty("success").GetBoolean())}/{data.GetArrayLength()} targets",
                 "tunnel.authenticatedEndToEnd" => $"{ReadJson(data, "security")}/{ReadJson(data, "protocol")} -> HTTP {ReadJson(data, "firstSuccessfulStatus")}",
                 "tunnel.dnsViaSocks" => ReadJson(data, "statusLine"),
-                "tunnel.download" => SummarizeDownload(data),
+                "tunnel.download" => SummarizeSpeedDirection(data, "download"),
                 "tunnel.httpProtocols" => $"{data.GetProperty("observations").EnumerateArray().Count(item => item.GetProperty("success").GetBoolean())}/{data.GetProperty("observations").GetArrayLength()} variants",
                 "tunnel.payloadMatrix" => $"largest={ReadJson(data, "largestSuccessfulBytes")} bytes",
-                "tunnel.upload" => $"{ReadJson(data, "bytes")} bytes @ {ReadJson(data, "kilobitsPerSecond")} kbps",
+                "tunnel.upload" => SummarizeSpeedDirection(data, "upload"),
                 "tunnel.controlledCanary" => $"source={ReadJson(data, "observedSourceIp")} correlation={ReadJson(data, "correlationId")}",
                 "tunnel.stability" => $"{ReadJson(data, "successes")}/{ReadJson(data, "attempts")} requests",
                 "tunnel.extended.coldWarm" => $"cold/warm samples={ReadJson(data, "samplesPerMode")}",
@@ -2772,8 +2775,26 @@ internal static partial class Program
             : "?";
     }
 
-    private static string SummarizeDownload(JsonElement data)
+    private static string SummarizeSpeedDirection(JsonElement data, string direction)
     {
+        if (data.TryGetProperty("recommendedMbps", out var recommended) && recommended.ValueKind == JsonValueKind.Number)
+        {
+            var flows = "?";
+            var confidence = ReadJson(data, "confidence");
+            if (data.TryGetProperty("series", out var series) && series.ValueKind == JsonValueKind.Array)
+            {
+                var selected = series.EnumerateArray().FirstOrDefault(item => item.TryGetProperty("recommendedMbps", out var value)
+                    && value.ValueKind == JsonValueKind.Number && Math.Abs(value.GetDouble() - recommended.GetDouble()) < 0.01);
+                if (selected.ValueKind != JsonValueKind.Undefined)
+                {
+                    flows = ReadJson(selected, "flows");
+                    confidence = ReadJson(selected, "confidence");
+                }
+            }
+            return $"{recommended.GetDouble():F2} Mbit/s {direction}, flows={flows}, confidence={confidence}";
+        }
+        if (direction == "upload" && data.TryGetProperty("kilobitsPerSecond", out _))
+            return $"{ReadJson(data, "bytes")} bytes @ {ReadJson(data, "kilobitsPerSecond")} kbps";
         if (!data.TryGetProperty("attempts", out var attempts) || attempts.GetArrayLength() == 0) return "no download result";
         var successful = attempts.EnumerateArray().FirstOrDefault(item => item.TryGetProperty("success", out var success) && success.GetBoolean());
         return successful.ValueKind == JsonValueKind.Undefined
@@ -2886,7 +2907,7 @@ internal static partial class Program
             ExtendedTest = new ExtendedTestMetadata { Enabled = true, Elevated = false, SoakDurationSeconds = 300, ParallelFlows = 20, NetworkLossSeconds = 5 },
             NetworkLabel = "self-test",
             TestContext = new TestContext { NodeId = "self-test-pc" },
-            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.4.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
+            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.5.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
             Input = new InputSummary { LoadedConnections = 1, ScheduledConnections = 1 },
             Environment = new NetworkEnvironment()
         };
@@ -2917,17 +2938,35 @@ internal static partial class Program
         Assert(comparison.DirectControlStable && comparison.Rows.Count == 1
             && comparison.Rows[0].TunnelEfficiencyPercent is > 75 and < 77,
             "Matched speed comparison or direct-control drift classification is incorrect.");
+        var unstableComparison = SpeedTestEngine.Compare(
+            new SpeedMeasurementReport { Series = [new SpeedFlowSeries { Direction = "download", Flows = 1, RecommendedMbps = 100, SuccessfulAttempts = 3 }] },
+            new SpeedMeasurementReport { Series = [new SpeedFlowSeries { Direction = "download", Flows = 1, RecommendedMbps = 80, SuccessfulAttempts = 3 }] },
+            new SpeedMeasurementReport { Series = [new SpeedFlowSeries { Direction = "download", Flows = 1, RecommendedMbps = 125, SuccessfulAttempts = 3 }] });
+        Assert(!unstableComparison.DirectControlStable, "Direct drift above 15% was not rejected.");
+        Assert(SpeedTestEngine.NormalizeCloudflareMeasurementSize(16 * 1024 * 1024) == 25_000_000
+            && SpeedTestEngine.NormalizeCloudflareMeasurementSize(64 * 1024 * 1024) == 64 * 1024 * 1024,
+            "Public speed endpoint request-size normalization is incorrect.");
         try
         {
             using var speedClient = new HttpClient(new SpeedSelfTestHttpHandler()) { Timeout = TimeSpan.FromSeconds(10) };
             var speedReport = SpeedTestEngine.MeasureAsync(speedClient,
-                new SpeedTestSettings("self-test", 10, 2, [1], 512 * 1024, 256 * 1024, 5),
+                new SpeedTestSettings("self-test", 250, 2, 2, [1], 512 * 1024, 256 * 1024, 5, 0),
                 "self-test", CancellationToken.None).GetAwaiter().GetResult();
             Assert(speedReport.Series.Count == 2
                 && speedReport.Series.All(item => item.SuccessfulAttempts == 2)
-                && speedReport.Series.All(item => item.Attempts.First().Role == "calibration")
-                && speedReport.Series.All(item => item.Attempts.Count == 3),
-                "Adaptive speed engine did not retain calibration plus successful measurement attempts.");
+                && speedReport.Series.All(item => item.Attempts.First().Role == "warmup")
+                && speedReport.Series.All(item => item.Calibrations.Count == 2)
+                && speedReport.Series.All(item => item.Attempts.Count == 5),
+                "Windowed speed engine did not retain warm-up, robust calibration and measurement attempts.");
+            Assert(speedReport.EndpointValidation.Count == 4 && speedReport.EndpointValidation.All(item => item.Success),
+                "Cross-provider endpoint validation controls were not retained.");
+            var matchedPlan = SpeedTestEngine.CreateMatchedPlan(speedReport);
+            var matchedReport = SpeedTestEngine.MeasureAsync(speedClient,
+                new SpeedTestSettings("self-test", 250, 2, 2, [1], 512 * 1024, 256 * 1024, 5, 0),
+                "matched-self-test", CancellationToken.None, matchedPlan).GetAwaiter().GetResult();
+            Assert(matchedReport.PlanSource == "matched-direct-plan"
+                && matchedReport.Series.All(item => item.RequestedBytesPerFlow == matchedPlan.GetBytes(item.Direction, item.Flows)),
+                "Matched speed workload plan was not reused exactly.");
         }
         catch (Exception ex)
         {
@@ -2942,7 +2981,7 @@ internal static partial class Program
                 {
                     RunId = "speed-selftest-12345678", StartedAt = DateTimeOffset.UtcNow,
                     CompletedAt = DateTimeOffset.UtcNow, DurationMs = 1, Platform = expectedPlatform,
-                    OperatingSystem = RuntimeInformation.OSDescription, ToolVersion = "3.4.0", Connections = 1
+                    OperatingSystem = RuntimeInformation.OSDescription, ToolVersion = "3.5.0", Connections = 1
                 },
                 Outcome = new OutcomeDecision { Outcome = OutcomeClassifier.Pass, ReasonCode = "SELF_TEST", Reason = "Package contract check." },
                 Profiles = [new SpeedOnlyProfileResult { ProfileId = "profile-01", Ordinal = 1, Name = "self-test" }]

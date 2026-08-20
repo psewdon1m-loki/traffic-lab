@@ -8,22 +8,24 @@ internal sealed record SpeedTestSettings(
     string Mode,
     int TargetWindowMs,
     int MeasurementAttempts,
+    int CalibrationAttempts,
     IReadOnlyList<int> FlowCounts,
     int DownloadMaximumBytes,
     int UploadMaximumBytes,
-    int LatencyIntervalMs)
+    int LatencyIntervalMs,
+    int RampUpMs)
 {
     public static SpeedTestSettings Normal { get; } = new(
-        "normal", 2_000, 3, [1], 16 * 1024 * 1024, 8 * 1024 * 1024, 400);
+        "normal", 2_500, 3, 3, [1], 32 * 1024 * 1024, 16 * 1024 * 1024, 350, 350);
 
     public static SpeedTestSettings Extended { get; } = new(
-        "extended", 3_000, 2, [1, 4, 16], 16 * 1024 * 1024, 8 * 1024 * 1024, 350);
+        "extended", 3_500, 2, 3, [1, 4, 16], 48 * 1024 * 1024, 24 * 1024 * 1024, 300, 500);
 
     public static SpeedTestSettings SpeedOnly { get; } = new(
-        "speed", 3_000, 3, [1, 4, 16], 24 * 1024 * 1024, 12 * 1024 * 1024, 300);
+        "speed", 4_000, 3, 3, [1, 4, 16], 64 * 1024 * 1024, 32 * 1024 * 1024, 250, 500);
 
     public static SpeedTestSettings DirectAfterControl { get; } = new(
-        "direct-after-control", 1_500, 2, [1], 8 * 1024 * 1024, 4 * 1024 * 1024, 400);
+        "direct-after-control", 2_500, 2, 2, [1], 32 * 1024 * 1024, 16 * 1024 * 1024, 350, 350);
 }
 
 internal static class SpeedTestEngine
@@ -33,6 +35,13 @@ internal static class SpeedTestEngine
     private const string DownloadEndpoint = "https://speed.cloudflare.com/__down";
     private const string UploadEndpoint = "https://speed.cloudflare.com/__up";
     private const string LatencyEndpoint = "https://www.gstatic.com/generate_204";
+    private static readonly (string Name, string Url)[] ValidationDownloadEndpoints =
+    [
+        ("cloudflare-anycast", "https://speed.cloudflare.com/__down?bytes=1048576"),
+        ("ovh-sbg", "https://sbg.proof.ovh.net/files/10Mb.dat"),
+        ("ovh-rbx", "https://rbx.proof.ovh.net/files/10Mb.dat"),
+        ("ovh-bhs", "https://bhs.proof.ovh.ca/files/10Mb.dat")
+    ];
 
     public static HttpClient CreateDirectClient(TimeSpan timeout)
     {
@@ -69,7 +78,7 @@ internal static class SpeedTestEngine
         {
             Timeout = timeout + TimeSpan.FromSeconds(45)
         };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("LokiTrafficLab-Speed/3.4");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("LokiTrafficLab-Speed/3.5");
         client.DefaultRequestHeaders.AcceptEncoding.Clear();
         client.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
         return client;
@@ -79,7 +88,8 @@ internal static class SpeedTestEngine
         HttpClient client,
         SpeedTestSettings settings,
         string path,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        SpeedMeasurementPlan? matchedPlan = null)
     {
         var watch = Stopwatch.StartNew();
         using var process = Process.GetCurrentProcess();
@@ -90,10 +100,12 @@ internal static class SpeedTestEngine
         foreach (var flows in settings.FlowCounts.Distinct().Order())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            series.Add(await MeasureDirectionAsync(client, settings, "download", flows, cancellationToken));
+            series.Add(await MeasureDirectionAsync(client, settings, "download", flows, matchedPlan, cancellationToken));
             cancellationToken.ThrowIfCancellationRequested();
-            series.Add(await MeasureDirectionAsync(client, settings, "upload", flows, cancellationToken));
+            series.Add(await MeasureDirectionAsync(client, settings, "upload", flows, matchedPlan, cancellationToken));
         }
+        ApplyCrossSeriesClassifications(series);
+        var endpointValidation = await MeasureEndpointValidationAsync(client, cancellationToken);
         watch.Stop();
         process.Refresh();
         var cpuDeltaMs = Math.Max(0, (process.TotalProcessorTime - processCpuBefore).TotalMilliseconds);
@@ -103,24 +115,29 @@ internal static class SpeedTestEngine
             : successful > 0 ? "low" : "unavailable";
         return new SpeedMeasurementReport
         {
-            MeasurementVersion = 3,
+            MeasurementVersion = 4,
             Path = path,
             Mode = settings.Mode,
             StartedAt = DateTimeOffset.UtcNow - watch.Elapsed,
             DurationMs = watch.ElapsedMilliseconds,
             TargetWindowMs = settings.TargetWindowMs,
+            RampUpMs = settings.RampUpMs,
             MeasurementAttempts = settings.MeasurementAttempts,
+            CalibrationAttempts = matchedPlan is null ? settings.CalibrationAttempts : 0,
             FlowCounts = settings.FlowCounts.ToArray(),
+            PlanSource = matchedPlan is null ? "locally-calibrated" : "matched-direct-plan",
             Endpoint = new SpeedEndpointContract
             {
                 Download = DownloadEndpoint,
                 Upload = UploadEndpoint,
                 Latency = LatencyEndpoint,
+                ValidationDownload = ValidationDownloadEndpoints.Select(item => item.Url).ToArray(),
                 ContentEncoding = "identity",
                 CacheBust = "unique query parameter per request",
                 Limitation = "A public endpoint is route-dependent. Configure a controlled primary and neutral twin for server-timestamped acceptance measurements."
             },
             IdleLatency = idleLatency,
+            EndpointValidation = endpointValidation,
             Series = series,
             ClientLoad = new SpeedClientLoad
             {
@@ -133,7 +150,7 @@ internal static class SpeedTestEngine
                 Interpretation = "High client CPU or memory pressure can cap application-layer throughput; compare this field across paths."
             },
             Confidence = confidence,
-            Interpretation = "recommendedMbps is the median aggregate payload rate across non-calibration attempts. effectiveMbps includes connection/TLS/TTFB or response acknowledgement. Duration, coefficient of variation, loaded latency and byte-cap flags bound confidence."
+            Interpretation = "recommendedMbps is the median aggregate rate inside a synchronized bounded measurement window. Warm-up and calibration samples are excluded. Confidence is downgraded for stragglers, concurrency collapse, endpoint variation and byte caps."
         };
     }
 
@@ -142,28 +159,40 @@ internal static class SpeedTestEngine
         SpeedTestSettings settings,
         string direction,
         int flows,
+        SpeedMeasurementPlan? matchedPlan,
         CancellationToken cancellationToken)
     {
         var watch = Stopwatch.StartNew();
         var calibrationBytes = direction == "download" ? DownloadCalibrationBytesPerFlow : UploadCalibrationBytesPerFlow;
         var maximumTotalBytes = direction == "download" ? settings.DownloadMaximumBytes : settings.UploadMaximumBytes;
-        var calibration = await MeasureBatchAsync(client, direction, flows, calibrationBytes, settings, "calibration", 0, cancellationToken);
-        var calibratedMbps = calibration.PayloadMbps ?? calibration.EffectiveMbps ?? 0;
+        var warmup = await MeasureBatchAsync(client, direction, flows, calibrationBytes, settings, "warmup", 0, fixedWindow: false, cancellationToken);
+        var calibrations = new List<SpeedBatchObservation>();
+        if (matchedPlan is null)
+        {
+            for (var index = 1; index <= settings.CalibrationAttempts; index++)
+                calibrations.Add(await MeasureBatchAsync(client, direction, flows, calibrationBytes, settings, "calibration", index, fixedWindow: false, cancellationToken));
+        }
+        var calibrationRates = calibrations.Where(item => item.Success)
+            .Select(item => item.PayloadMbps ?? item.EffectiveMbps).Where(item => item.HasValue).Select(item => item!.Value).Order().ToArray();
+        var calibratedMbps = Median(calibrationRates) ?? warmup.PayloadMbps ?? warmup.EffectiveMbps ?? 0;
         var targetTotalBytes = calibratedMbps > 0
-            ? (long)Math.Ceiling(calibratedMbps * 125d * settings.TargetWindowMs)
+            ? (long)Math.Ceiling(calibratedMbps * 125d * (settings.TargetWindowMs + settings.RampUpMs) * 1.35d)
             : (long)calibrationBytes * flows;
         var minimumTotalBytes = (long)calibrationBytes * flows;
         targetTotalBytes = Math.Clamp(targetTotalBytes, minimumTotalBytes, maximumTotalBytes);
-        var requestedPerFlow = (int)Math.Clamp(
+        var calibratedPerFlow = (int)Math.Clamp(
             (long)Math.Ceiling(targetTotalBytes / (double)flows),
             Math.Max(64 * 1024, calibrationBytes),
             Math.Max(calibrationBytes, maximumTotalBytes / Math.Max(1, flows)));
+        var requestedPerFlow = matchedPlan?.GetBytes(direction, flows) ?? calibratedPerFlow;
+        requestedPerFlow = (int)Math.Clamp(requestedPerFlow, calibrationBytes, Math.Max(calibrationBytes, maximumTotalBytes / Math.Max(1, flows)));
 
-        var attempts = new List<SpeedBatchObservation> { calibration };
+        var attempts = new List<SpeedBatchObservation> { warmup };
+        attempts.AddRange(calibrations);
         for (var attempt = 1; attempt <= settings.MeasurementAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            attempts.Add(await MeasureBatchAsync(client, direction, flows, requestedPerFlow, settings, "measurement", attempt, cancellationToken));
+            attempts.Add(await MeasureBatchAsync(client, direction, flows, requestedPerFlow, settings, "measurement", attempt, fixedWindow: true, cancellationToken));
         }
         watch.Stop();
         var selected = attempts.Where(item => item.Role == "measurement" && item.Success).ToArray();
@@ -172,8 +201,14 @@ internal static class SpeedTestEngine
         var durations = selected.Select(item => item.PayloadElapsedMs ?? item.ElapsedMs).ToArray();
         var variation = CoefficientOfVariation(payload);
         var durationSufficient = durations.Length > 0 && durations.Count(value => value >= settings.TargetWindowMs * 0.8) >= Math.Max(1, durations.Length - 1);
-        var hitCap = requestedPerFlow * (long)flows >= maximumTotalBytes;
-        var confidence = selected.Length == settings.MeasurementAttempts && variation <= 0.25 && durationSufficient ? "high"
+        var configuredBudgetReached = requestedPerFlow * (long)flows >= maximumTotalBytes;
+        var hitCap = configuredBudgetReached && !durationSufficient;
+        var classifications = attempts.Where(item => item.Role == "measurement").SelectMany(item => item.Classifications).Distinct().ToList();
+        if (hitCap) classifications.Add("BYTE_CAP_LIMITED");
+        if (variation > 0.35) classifications.Add("ENDPOINT_UNSTABLE");
+        if (classifications.Count == 0) classifications.Add("VALID");
+        var hasAnomaly = classifications.Any(item => item is "STRAGGLER_DETECTED" or "ENDPOINT_UNSTABLE" or "ENDPOINT_RATE_LIMITED" or "ENDPOINT_REQUEST_REJECTED" or "UPLOAD_ACK_BOUNDED_ESTIMATE");
+        var confidence = selected.Length == settings.MeasurementAttempts && variation <= 0.25 && durationSufficient && !hasAnomaly && !hitCap ? "high"
             : selected.Length >= 2 && variation <= 0.50 ? "medium"
             : selected.Length > 0 ? "low" : "unavailable";
         var reasons = new List<string>();
@@ -181,6 +216,9 @@ internal static class SpeedTestEngine
         if (!durationSufficient) reasons.Add("The byte cap or path behavior prevented most attempts from spanning at least 80% of the target window.");
         if (variation > 0.25) reasons.Add($"Payload coefficient of variation was {variation:F2}.");
         if (hitCap) reasons.Add("Adaptive sizing reached the configured byte budget; high-speed paths may be underestimated.");
+        if (classifications.Contains("ENDPOINT_RATE_LIMITED")) reasons.Add("The public speed endpoint returned HTTP 429 under this concurrency; this is an endpoint ceiling, not proof of proxy failure.");
+        if (classifications.Contains("ENDPOINT_REQUEST_REJECTED")) reasons.Add("The public speed endpoint rejected the generated request size; this series is not usable as a path-failure signal.");
+        if (classifications.Contains("UPLOAD_ACK_BOUNDED_ESTIMATE")) reasons.Add("The full upload was accepted; Mbps uses server-acknowledged request duration and is capped below high confidence without a controlled server timestamp.");
         return new SpeedFlowSeries
         {
             Direction = direction,
@@ -191,7 +229,9 @@ internal static class SpeedTestEngine
             ByteCapReached = hitCap,
             RequestedMeasurementAttempts = settings.MeasurementAttempts,
             SuccessfulAttempts = selected.Length,
-            Calibration = calibration,
+            Warmup = warmup,
+            Calibration = calibrations.FirstOrDefault(item => item.PayloadMbps == Median(calibrationRates)) ?? calibrations.FirstOrDefault() ?? warmup,
+            Calibrations = calibrations,
             Attempts = attempts,
             RecommendedMbps = Median(payload),
             MedianEffectiveMbps = Median(effective),
@@ -200,6 +240,7 @@ internal static class SpeedTestEngine
             CoefficientOfVariation = Math.Round(variation, 3),
             Confidence = confidence,
             ConfidenceReasons = reasons,
+            Classifications = classifications.Distinct().ToArray(),
             ElapsedMs = watch.ElapsedMilliseconds
         };
     }
@@ -212,16 +253,35 @@ internal static class SpeedTestEngine
         SpeedTestSettings settings,
         string role,
         int attempt,
+        bool fixedWindow,
         CancellationToken cancellationToken)
     {
         var watch = Stopwatch.StartNew();
+        using var transferCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (fixedWindow)
+            transferCancellation.CancelAfter(TimeSpan.FromMilliseconds(settings.RampUpMs + settings.TargetWindowMs + 10_000));
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = new SpeedBatchClock(fixedWindow
+            ? () =>
+            {
+                try
+                {
+                    transferCancellation.CancelAfter(TimeSpan.FromMilliseconds(settings.RampUpMs + settings.TargetWindowMs));
+                }
+                catch (ObjectDisposedException) { }
+            }
+            : null);
         using var latencyCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var latencyTask = MeasureLoadedLatencyAsync(client, settings.LatencyIntervalMs, latencyCancellation.Token);
         var tasks = Enumerable.Range(1, flows)
             .Select(flow => direction == "download"
-                ? DownloadFlowAsync(client, flow, bytesPerFlow, role == "calibration", cancellationToken)
-                : UploadFlowAsync(client, flow, bytesPerFlow, role == "calibration", cancellationToken))
+                ? DownloadFlowAsync(client, flow, bytesPerFlow, false, gate.Task, clock,
+                    settings.RampUpMs, settings.TargetWindowMs, fixedWindow, transferCancellation.Token, cancellationToken)
+                : UploadFlowAsync(client, flow, bytesPerFlow, false, gate.Task, clock,
+                    settings.RampUpMs, settings.TargetWindowMs, fixedWindow, transferCancellation.Token, cancellationToken))
             .ToArray();
+        clock.Start();
+        gate.TrySetResult();
         SpeedFlowObservation[] observations;
         try
         {
@@ -233,17 +293,40 @@ internal static class SpeedTestEngine
         }
         var loadedLatency = await latencyTask;
         watch.Stop();
-        var successful = observations.Where(item => item.Success).ToArray();
-        var bytes = successful.Sum(item => item.TransferredBytes);
+        var uploadAckBounded = fixedWindow && direction == "upload" && observations.Length == flows
+            && observations.All(item => item.ServerAcknowledged == true && !item.IntentionalWindowStop
+                && item.TransferredBytes == item.RequestedBytes);
+        var successful = uploadAckBounded ? observations : observations.Where(item => item.Success).ToArray();
+        var transferredBytes = successful.Sum(item => item.TransferredBytes);
+        var measuredBytes = uploadAckBounded ? transferredBytes
+            : fixedWindow ? successful.Sum(item => item.MeasurementWindowBytes) : transferredBytes;
         var payloadStart = successful.Select(item => item.PayloadStartMs).Where(item => item.HasValue).Select(item => item!.Value).DefaultIfEmpty(0).Min();
-        // Download separates TTFB from transfer time. Upload deliberately uses the full
-        // batch wall clock because per-request socket writes may complete into local OS
-        // buffers before the server has acknowledged the final concurrent flow.
         var payloadElapsed = successful.Length == 0 ? (long?)null
+            : uploadAckBounded
+                ? Math.Max(1, successful.Max(item => item.ServerAcknowledgementMs ?? item.ElapsedMs))
+            : fixedWindow ? Math.Clamp(clock.PayloadElapsedMilliseconds - settings.RampUpMs, 1, settings.TargetWindowMs)
             : direction == "upload" ? Math.Max(1, watch.ElapsedMilliseconds)
             : Math.Max(1, watch.ElapsedMilliseconds - payloadStart);
-        var effectiveMbps = bytes > 0 ? Math.Round(bytes * 8d / Math.Max(1, watch.ElapsedMilliseconds) / 1000d, 2) : (double?)null;
-        var payloadMbps = payloadElapsed.HasValue && bytes > 0 ? Math.Round(bytes * 8d / payloadElapsed.Value / 1000d, 2) : (double?)null;
+        var effectiveMbps = measuredBytes > 0 ? Math.Round(measuredBytes * 8d / Math.Max(1, fixedWindow ? payloadElapsed!.Value : watch.ElapsedMilliseconds) / 1000d, 2) : (double?)null;
+        var payloadMbps = payloadElapsed.HasValue && measuredBytes > 0 ? Math.Round(measuredBytes * 8d / payloadElapsed.Value / 1000d, 2) : (double?)null;
+        var classifications = new List<string>();
+        if (fixedWindow && successful.Length < flows)
+            classifications.Add("STRAGGLER_DETECTED");
+        var perFlowBytes = successful.Select(item => (double)(fixedWindow ? item.MeasurementWindowBytes : item.TransferredBytes)).Order().ToArray();
+        var medianFlowBytes = Median(perFlowBytes);
+        if (flows > 1 && medianFlowBytes > 0 && perFlowBytes.FirstOrDefault() < medianFlowBytes * 0.35)
+            classifications.Add("STRAGGLER_DETECTED");
+        var firstBytes = successful.Select(item => item.PayloadStartMs).Where(item => item.HasValue).Select(item => item!.Value).Order().ToArray();
+        if (flows > 1 && firstBytes.Length > 1 && firstBytes[^1] - firstBytes[firstBytes.Length / 2] > Math.Max(750, settings.TargetWindowMs / 2))
+            classifications.Add("STRAGGLER_DETECTED");
+        if (direction == "upload" && successful.Any(item => item.IntentionalWindowStop && item.ServerAcknowledged != true))
+            classifications.Add("UPLOAD_SERVER_ACK_UNAVAILABLE");
+        if (uploadAckBounded)
+            classifications.Add("UPLOAD_ACK_BOUNDED_ESTIMATE");
+        if (observations.Any(item => item.StatusCode == 429))
+            classifications.Add("ENDPOINT_RATE_LIMITED");
+        if (observations.Any(item => item.StatusCode == 403))
+            classifications.Add("ENDPOINT_REQUEST_REJECTED");
         return new SpeedBatchObservation
         {
             Role = role,
@@ -251,15 +334,18 @@ internal static class SpeedTestEngine
             Flows = flows,
             RequestedBytesPerFlow = bytesPerFlow,
             SuccessfulFlows = successful.Length,
-            TransferredBytes = bytes,
+            TransferredBytes = transferredBytes,
+            MeasurementWindowBytes = measuredBytes,
+            MeasurementWindowMs = payloadElapsed,
             ElapsedMs = watch.ElapsedMilliseconds,
             PayloadElapsedMs = payloadElapsed,
             EffectiveMbps = effectiveMbps,
             PayloadMbps = payloadMbps,
-            Success = successful.Length == flows,
+            Success = fixedWindow ? successful.Length > 0 && measuredBytes > 0 : successful.Length == flows,
             FlowObservations = observations,
             LoadedLatency = loadedLatency,
-            Error = successful.Length == flows ? null : $"Only {successful.Length}/{flows} flows completed."
+            Classifications = classifications.Distinct().ToArray(),
+            Error = successful.Length == flows ? null : $"Only {successful.Length}/{flows} flows contributed inside the bounded measurement window."
         };
     }
 
@@ -268,48 +354,76 @@ internal static class SpeedTestEngine
         int flow,
         int requestedBytes,
         bool forceClose,
-        CancellationToken cancellationToken)
+        Task gate,
+        SpeedBatchClock clock,
+        int rampUpMs,
+        int targetWindowMs,
+        bool fixedWindow,
+        CancellationToken transferToken,
+        CancellationToken userCancellationToken)
     {
         var watch = Stopwatch.StartNew();
+        long bytes = 0, windowBytes = 0;
+        long? firstByteMs = null;
+        int? statusCode = null;
+        string? httpVersion = null, endpointIdentity = null, error = null;
+        var intentionalStop = false;
         try
         {
-            var url = $"{DownloadEndpoint}?bytes={requestedBytes}&tlab={Guid.NewGuid():N}";
+            await gate.WaitAsync(transferToken);
+            // Cloudflare's public engine uses discrete measurement sizes. Some intermediate
+            // values are rejected by the edge (HTTP 403), so bounded runs request the next
+            // documented bucket and still stop after the local measurement window.
+            var endpointRequestBytes = fixedWindow ? NormalizeCloudflareMeasurementSize(requestedBytes) : requestedBytes;
+            var url = $"{DownloadEndpoint}?bytes={endpointRequestBytes}&tlab={Guid.NewGuid():N}";
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.ConnectionClose = forceClose;
             request.Headers.AcceptEncoding.Clear();
             request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, transferToken);
+            statusCode = (int)response.StatusCode;
+            httpVersion = response.Version.ToString();
+            endpointIdentity = response.Headers.TryGetValues("CF-Ray", out var ray) ? ray.FirstOrDefault()
+                : response.Headers.Server.ToString();
             response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var stream = await response.Content.ReadAsStreamAsync(transferToken);
             var buffer = new byte[64 * 1024];
-            long bytes = 0;
-            long? firstByteMs = null;
             while (bytes < requestedBytes)
             {
-                var read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, requestedBytes - bytes)), cancellationToken);
+                var read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, requestedBytes - bytes)), transferToken);
                 if (read == 0) break;
                 firstByteMs ??= watch.ElapsedMilliseconds;
+                clock.MarkPayloadStarted();
                 bytes += read;
+                var windowElapsed = clock.PayloadElapsedMilliseconds;
+                if (!fixedWindow || windowElapsed >= rampUpMs && windowElapsed <= rampUpMs + targetWindowMs)
+                    windowBytes += read;
             }
-            watch.Stop();
-            return new SpeedFlowObservation
-            {
-                Flow = flow,
-                Success = response.IsSuccessStatusCode && bytes >= requestedBytes,
-                StatusCode = (int)response.StatusCode,
-                RequestedBytes = requestedBytes,
-                TransferredBytes = bytes,
-                ElapsedMs = watch.ElapsedMilliseconds,
-                PayloadStartMs = firstByteMs,
-                PayloadElapsedMs = firstByteMs.HasValue ? Math.Max(1, watch.ElapsedMilliseconds - firstByteMs.Value) : null
-            };
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (userCancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (fixedWindow && transferToken.IsCancellationRequested) { intentionalStop = true; }
         catch (Exception ex)
         {
-            watch.Stop();
-            return new SpeedFlowObservation { Flow = flow, RequestedBytes = requestedBytes, ElapsedMs = watch.ElapsedMilliseconds, Error = ProgramAccess.Redact(ex.Message) };
+            error = ProgramAccess.Redact(ex.Message);
         }
+        watch.Stop();
+        return new SpeedFlowObservation
+        {
+            Flow = flow,
+            Success = fixedWindow ? windowBytes > 0 : statusCode is >= 200 and < 300 && bytes >= requestedBytes,
+            StatusCode = statusCode,
+            RequestedBytes = fixedWindow ? NormalizeCloudflareMeasurementSize(requestedBytes) : requestedBytes,
+            TransferredBytes = bytes,
+            MeasurementWindowBytes = fixedWindow ? windowBytes : bytes,
+            ElapsedMs = watch.ElapsedMilliseconds,
+            PayloadStartMs = firstByteMs,
+            PayloadElapsedMs = firstByteMs.HasValue ? Math.Max(1, watch.ElapsedMilliseconds - firstByteMs.Value) : null,
+            IntentionalWindowStop = intentionalStop,
+            ServerAcknowledged = statusCode is >= 200 and < 300,
+            HttpVersion = httpVersion,
+            EndpointIdentity = endpointIdentity,
+            Error = error
+        };
     }
 
     private static async Task<SpeedFlowObservation> UploadFlowAsync(
@@ -317,35 +431,61 @@ internal static class SpeedTestEngine
         int flow,
         int requestedBytes,
         bool forceClose,
-        CancellationToken cancellationToken)
+        Task gate,
+        SpeedBatchClock clock,
+        int rampUpMs,
+        int targetWindowMs,
+        bool fixedWindow,
+        CancellationToken transferToken,
+        CancellationToken userCancellationToken)
     {
         var watch = Stopwatch.StartNew();
+        GeneratedPayloadContent? content = null;
+        int? statusCode = null;
+        string? httpVersion = null, endpointIdentity = null, error = null;
+        var intentionalStop = false;
         try
         {
-            using var content = new GeneratedPayloadContent(requestedBytes);
+            await gate.WaitAsync(transferToken);
+            content = new GeneratedPayloadContent(requestedBytes, clock, rampUpMs, targetWindowMs, fixedWindow);
             using var request = new HttpRequestMessage(HttpMethod.Post, $"{UploadEndpoint}?tlab={Guid.NewGuid():N}") { Content = content };
             request.Headers.ConnectionClose = forceClose;
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            watch.Stop();
-            return new SpeedFlowObservation
-            {
-                Flow = flow,
-                Success = response.IsSuccessStatusCode && content.BytesWritten == requestedBytes,
-                StatusCode = (int)response.StatusCode,
-                RequestedBytes = requestedBytes,
-                TransferredBytes = content.BytesWritten,
-                ElapsedMs = watch.ElapsedMilliseconds,
-                PayloadStartMs = content.WriteStartedMs,
-                PayloadElapsedMs = content.WriteElapsedMs,
-                ServerAcknowledgementMs = watch.ElapsedMilliseconds
-            };
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, transferToken);
+            statusCode = (int)response.StatusCode;
+            httpVersion = response.Version.ToString();
+            endpointIdentity = response.Headers.TryGetValues("CF-Ray", out var ray) ? ray.FirstOrDefault()
+                : response.Headers.Server.ToString();
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (userCancellationToken.IsCancellationRequested) { content?.Dispose(); throw; }
+        catch (OperationCanceledException) when (fixedWindow && transferToken.IsCancellationRequested) { intentionalStop = true; }
         catch (Exception ex)
         {
-            watch.Stop();
-            return new SpeedFlowObservation { Flow = flow, RequestedBytes = requestedBytes, ElapsedMs = watch.ElapsedMilliseconds, Error = ProgramAccess.Redact(ex.Message) };
+            error = ProgramAccess.Redact(ex.Message);
         }
+        watch.Stop();
+        var bytesWritten = content?.BytesWritten ?? 0;
+        var windowBytes = content?.MeasurementWindowBytes ?? 0;
+        var acknowledgedComplete = statusCode is >= 200 and < 300 && bytesWritten == requestedBytes;
+        var acceptedWindowBytes = fixedWindow && windowBytes == 0 && acknowledgedComplete ? bytesWritten : windowBytes;
+        content?.Dispose();
+        return new SpeedFlowObservation
+        {
+            Flow = flow,
+            Success = fixedWindow ? acceptedWindowBytes > 0 : acknowledgedComplete,
+            StatusCode = statusCode,
+            RequestedBytes = requestedBytes,
+            TransferredBytes = bytesWritten,
+            MeasurementWindowBytes = fixedWindow ? acceptedWindowBytes : bytesWritten,
+            ElapsedMs = watch.ElapsedMilliseconds,
+            PayloadStartMs = content?.WriteStartedMs,
+            PayloadElapsedMs = content?.WriteElapsedMs,
+            ServerAcknowledgementMs = statusCode is >= 200 and < 300 ? watch.ElapsedMilliseconds : null,
+            IntentionalWindowStop = intentionalStop,
+            ServerAcknowledged = statusCode is >= 200 and < 300,
+            HttpVersion = httpVersion,
+            EndpointIdentity = endpointIdentity,
+            Error = error
+        };
     }
 
     private static async Task<SpeedLatencySummary> MeasureIdleLatencyAsync(HttpClient client, int attempts, CancellationToken cancellationToken)
@@ -391,6 +531,69 @@ internal static class SpeedTestEngine
         catch { return null; }
     }
 
+    private static async Task<IReadOnlyList<SpeedEndpointProbe>> MeasureEndpointValidationAsync(
+        HttpClient client, CancellationToken cancellationToken)
+    {
+        var tasks = ValidationDownloadEndpoints.Select(endpoint => ProbeValidationEndpointAsync(client, endpoint, cancellationToken));
+        return await Task.WhenAll(tasks);
+    }
+
+    private static async Task<SpeedEndpointProbe> ProbeValidationEndpointAsync(
+        HttpClient client, (string Name, string Url) endpoint, CancellationToken cancellationToken)
+    {
+        const int targetBytes = 1024 * 1024;
+        var watch = Stopwatch.StartNew();
+        long bytes = 0;
+        long? firstByteMs = null;
+        int? statusCode = null;
+        string? httpVersion = null, endpointIdentity = null, error = null;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(7));
+        try
+        {
+            var separator = endpoint.Url.Contains('?') ? '&' : '?';
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{endpoint.Url}{separator}tlab={Guid.NewGuid():N}");
+            request.Headers.Range = new RangeHeaderValue(0, targetBytes - 1);
+            request.Headers.AcceptEncoding.Clear();
+            request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            statusCode = (int)response.StatusCode;
+            httpVersion = response.Version.ToString();
+            endpointIdentity = response.Headers.TryGetValues("CF-Ray", out var ray) ? ray.FirstOrDefault()
+                : response.Headers.Server.ToString();
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+            var buffer = new byte[64 * 1024];
+            while (bytes < targetBytes)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, targetBytes - bytes)), timeout.Token);
+                if (read == 0) break;
+                firstByteMs ??= watch.ElapsedMilliseconds;
+                bytes += read;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex) { error = ProgramAccess.Redact(ex.Message); }
+        watch.Stop();
+        var payloadMs = firstByteMs.HasValue ? Math.Max(1, watch.ElapsedMilliseconds - firstByteMs.Value) : (long?)null;
+        return new SpeedEndpointProbe
+        {
+            Name = endpoint.Name,
+            Url = endpoint.Url,
+            StatusCode = statusCode,
+            Success = statusCode is >= 200 and < 400 && bytes == targetBytes,
+            Bytes = bytes,
+            TotalMs = watch.ElapsedMilliseconds,
+            TimeToFirstByteMs = firstByteMs,
+            PayloadMs = payloadMs,
+            PayloadMbps = payloadMs.HasValue && bytes > 0 ? Math.Round(bytes * 8d / payloadMs.Value / 1000d, 2) : null,
+            HttpVersion = httpVersion,
+            EndpointIdentity = endpointIdentity,
+            Error = error,
+            Interpretation = "A 1 MiB cross-provider control detects endpoint/CDN/peering bias; it is not merged into the matched primary speed result."
+        };
+    }
+
     private static SpeedLatencySummary SummarizeLatency(IReadOnlyList<long> values, int failures)
     {
         var ordered = values.Select(value => (double)value).Order().ToArray();
@@ -408,6 +611,131 @@ internal static class SpeedTestEngine
         };
     }
 
+    public static SpeedMeasurementPlan CreateMatchedPlan(SpeedMeasurementReport report)
+    {
+        var plan = new SpeedMeasurementPlan();
+        foreach (var series in report.Series)
+            plan.SetBytes(series.Direction, series.Flows, series.RequestedBytesPerFlow);
+        return plan;
+    }
+
+    public static SpeedMeasurementReport CombineReports(string path, params SpeedMeasurementReport[] reports)
+    {
+        var available = reports.Where(item => item is not null).ToArray();
+        if (available.Length == 0) return new SpeedMeasurementReport { Path = path };
+        var first = available[0];
+        var combinedSeries = new List<SpeedFlowSeries>();
+        foreach (var key in available.SelectMany(item => item.Series).Select(item => (item.Direction, item.Flows)).Distinct())
+        {
+            var matching = available.SelectMany(item => item.Series)
+                .Where(item => item.Direction == key.Direction && item.Flows == key.Flows).ToArray();
+            var template = matching[0];
+            var selected = matching.SelectMany(item => item.Attempts)
+                .Where(item => item.Role == "measurement" && item.Success).ToArray();
+            var payload = selected.Select(item => item.PayloadMbps).Where(item => item.HasValue).Select(item => item!.Value).Order().ToArray();
+            var effective = selected.Select(item => item.EffectiveMbps).Where(item => item.HasValue).Select(item => item!.Value).Order().ToArray();
+            var variation = CoefficientOfVariation(payload);
+            var classifications = matching.SelectMany(item => item.Classifications).Where(item => item != "VALID").Distinct().ToList();
+            if (variation > 0.35 && !classifications.Contains("ENDPOINT_UNSTABLE")) classifications.Add("ENDPOINT_UNSTABLE");
+            if (classifications.Count == 0) classifications.Add("VALID");
+            var seriesConfidence = selected.Length == matching.Sum(item => item.RequestedMeasurementAttempts)
+                && variation <= 0.25 && classifications.SequenceEqual(["VALID"]) ? "high"
+                : selected.Length >= 2 && variation <= 0.50 ? "medium"
+                : selected.Length > 0 ? "low" : "unavailable";
+            combinedSeries.Add(new SpeedFlowSeries
+            {
+                Direction = key.Direction,
+                Flows = key.Flows,
+                TargetWindowMs = template.TargetWindowMs,
+                RequestedBytesPerFlow = template.RequestedBytesPerFlow,
+                MaximumTotalBytesPerAttempt = template.MaximumTotalBytesPerAttempt,
+                ByteCapReached = matching.Any(item => item.ByteCapReached),
+                RequestedMeasurementAttempts = matching.Sum(item => item.RequestedMeasurementAttempts),
+                SuccessfulAttempts = selected.Length,
+                Warmup = template.Warmup,
+                Calibration = template.Calibration,
+                Calibrations = matching.SelectMany(item => item.Calibrations).ToArray(),
+                Attempts = matching.SelectMany(item => item.Attempts).ToArray(),
+                RecommendedMbps = Median(payload),
+                MedianEffectiveMbps = Median(effective),
+                P10Mbps = Percentile(payload, 0.10),
+                P90Mbps = Percentile(payload, 0.90),
+                CoefficientOfVariation = Math.Round(variation, 3),
+                Confidence = seriesConfidence,
+                ConfidenceReasons = matching.SelectMany(item => item.ConfidenceReasons).Distinct().ToArray(),
+                Classifications = classifications,
+                ElapsedMs = matching.Sum(item => item.ElapsedMs)
+            });
+        }
+        ApplyCrossSeriesClassifications(combinedSeries);
+        var latencyValues = available.SelectMany(item => item.IdleLatency.SamplesMs).ToArray();
+        var failures = available.Sum(item => item.IdleLatency.Failed);
+        var confidence = combinedSeries.All(item => item.Confidence == "high") ? "high"
+            : combinedSeries.All(item => item.Confidence is "high" or "medium") ? "medium" : "low";
+        return new SpeedMeasurementReport
+        {
+            MeasurementVersion = first.MeasurementVersion,
+            Path = path,
+            Mode = first.Mode,
+            StartedAt = available.Min(item => item.StartedAt),
+            DurationMs = available.Sum(item => item.DurationMs),
+            TargetWindowMs = first.TargetWindowMs,
+            RampUpMs = first.RampUpMs,
+            MeasurementAttempts = combinedSeries.Max(item => item.RequestedMeasurementAttempts),
+            CalibrationAttempts = available.Sum(item => item.CalibrationAttempts),
+            FlowCounts = first.FlowCounts,
+            PlanSource = "ABBA-combined-matched-plan",
+            Endpoint = first.Endpoint,
+            IdleLatency = SummarizeLatency(latencyValues, failures),
+            EndpointValidation = available.SelectMany(item => item.EndpointValidation).ToArray(),
+            Series = combinedSeries,
+            ClientLoad = new SpeedClientLoad
+            {
+                ProcessCpuTimeMs = available.Sum(item => item.ClientLoad.ProcessCpuTimeMs ?? 0),
+                NormalizedProcessCpuPercent = available.Average(item => item.ClientLoad.NormalizedProcessCpuPercent ?? 0),
+                ManagedMemoryBeforeBytes = available.First().ClientLoad.ManagedMemoryBeforeBytes,
+                ManagedMemoryAfterBytes = available.Last().ClientLoad.ManagedMemoryAfterBytes,
+                PeakWorkingSetBytes = available.Max(item => item.ClientLoad.PeakWorkingSetBytes ?? 0),
+                Interpretation = "Combined client load across the two tunnel legs of the ABBA sequence."
+            },
+            Confidence = confidence,
+            Interpretation = "Combined median across the two matched tunnel legs in a Direct-Tunnel-Tunnel-Direct sequence."
+        };
+    }
+
+    public static SpeedDisplaySummary Summarize(SpeedMeasurementReport report)
+    {
+        static SpeedFlowSeries? Pick(IEnumerable<SpeedFlowSeries> source, string direction)
+            => source.Where(item => item.Direction == direction && item.RecommendedMbps.HasValue)
+                .OrderBy(item => item.Classifications.Contains("CONCURRENCY_COLLAPSE") ? 1 : 0)
+                .ThenBy(item => item.Flows == 4 ? 0 : item.Flows == 1 ? 1 : 2)
+                .FirstOrDefault();
+        var download = Pick(report.Series, "download");
+        var upload = Pick(report.Series, "upload");
+        var confidence = new[] { download?.Confidence, upload?.Confidence }.All(item => item == "high") ? "high"
+            : new[] { download?.Confidence, upload?.Confidence }.All(item => item is "high" or "medium") ? "medium" : "low";
+        return new SpeedDisplaySummary(download?.RecommendedMbps, upload?.RecommendedMbps,
+            download?.Flows, upload?.Flows, confidence);
+    }
+
+    private static void ApplyCrossSeriesClassifications(IReadOnlyList<SpeedFlowSeries> series)
+    {
+        foreach (var direction in new[] { "download", "upload" })
+        {
+            var baseline = series.FirstOrDefault(item => item.Direction == direction && item.Flows == 1)?.RecommendedMbps;
+            if (!baseline.HasValue || baseline <= 0) continue;
+            foreach (var item in series.Where(item => item.Direction == direction && item.Flows > 1 && item.RecommendedMbps.HasValue))
+            {
+                if (item.RecommendedMbps!.Value >= baseline.Value * 0.55) continue;
+                item.Classifications = item.Classifications.Where(value => value != "VALID")
+                    .Append("CONCURRENCY_COLLAPSE").Distinct().ToArray();
+                item.Confidence = "low";
+                item.ConfidenceReasons = item.ConfidenceReasons.Append(
+                    $"{item.Flows}-flow throughput fell below 55% of the matched one-flow result.").Distinct().ToArray();
+            }
+        }
+    }
+
     public static SpeedPathComparison Compare(SpeedMeasurementReport before, SpeedMeasurementReport tunnel, SpeedMeasurementReport after)
     {
         var rows = new List<SpeedComparisonRow>();
@@ -417,8 +745,8 @@ internal static class SpeedTestEngine
             var post = after.Series.FirstOrDefault(item => item.Direction == tunnelSeries.Direction && item.Flows == tunnelSeries.Flows)?.RecommendedMbps;
             var control = Median(new[] { pre, post }.Where(item => item.HasValue).Select(item => item!.Value).Order().ToArray());
             var tunnelMbps = tunnelSeries.RecommendedMbps;
-            var drift = pre.HasValue && post.HasValue && Math.Min(pre.Value, post.Value) > 0
-                ? Math.Abs(post.Value - pre.Value) / Math.Min(pre.Value, post.Value)
+            var drift = pre.HasValue && post.HasValue && pre.Value + post.Value > 0
+                ? Math.Abs(post.Value - pre.Value) / ((pre.Value + post.Value) / 2d)
                 : (double?)null;
             rows.Add(new SpeedComparisonRow
             {
@@ -430,14 +758,16 @@ internal static class SpeedTestEngine
                 InterpolatedDirectMbps = control,
                 TunnelEfficiencyPercent = control > 0 && tunnelMbps.HasValue ? Math.Round(tunnelMbps.Value * 100d / control.Value, 2) : null,
                 DirectDriftPercent = drift.HasValue ? Math.Round(drift.Value * 100, 2) : null,
-                Confidence = !control.HasValue || !tunnelMbps.HasValue ? "unavailable" : drift <= 0.25 ? tunnelSeries.Confidence : "low",
-                Interpretation = drift > 0.25
-                    ? "Direct controls changed by more than 25%; underlay drift makes proxy attribution low-confidence."
-                    : "Direct controls were sufficiently stable for a matched tunnel-efficiency estimate."
+                Confidence = !control.HasValue || !tunnelMbps.HasValue ? "unavailable" : drift <= 0.15 ? tunnelSeries.Confidence : "low",
+                Interpretation = !drift.HasValue
+                    ? "A same-flow direct-after control was unavailable; proxy attribution is low-confidence."
+                    : drift > 0.15
+                    ? "Direct controls changed by more than 15%; underlay drift makes proxy attribution low-confidence."
+                    : "Same-flow direct controls were sufficiently stable for a matched tunnel-efficiency estimate."
             });
         }
         var comparable = rows.Where(item => item.DirectDriftPercent.HasValue).ToArray();
-        return new SpeedPathComparison { Rows = rows, DirectControlStable = comparable.Length > 0 && comparable.All(item => item.DirectDriftPercent <= 25) };
+        return new SpeedPathComparison { Rows = rows, DirectControlStable = comparable.Length == rows.Count && comparable.Length > 0 && comparable.All(item => item.DirectDriftPercent <= 15) };
     }
 
     public static StageResult ToStage(string name, SpeedMeasurementReport report)
@@ -501,13 +831,22 @@ internal static class SpeedTestEngine
     private sealed class GeneratedPayloadContent : HttpContent
     {
         private readonly int length;
+        private readonly SpeedBatchClock clock;
+        private readonly int rampUpMs;
+        private readonly int targetWindowMs;
+        private readonly bool fixedWindow;
         public long BytesWritten { get; private set; }
+        public long MeasurementWindowBytes { get; private set; }
         public long? WriteStartedMs { get; private set; }
         public long? WriteElapsedMs { get; private set; }
 
-        public GeneratedPayloadContent(int length)
+        public GeneratedPayloadContent(int length, SpeedBatchClock clock, int rampUpMs, int targetWindowMs, bool fixedWindow)
         {
             this.length = length;
+            this.clock = clock;
+            this.rampUpMs = rampUpMs;
+            this.targetWindowMs = targetWindowMs;
+            this.fixedWindow = fixedWindow;
             Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             Headers.ContentLength = length;
         }
@@ -529,6 +868,10 @@ internal static class SpeedTestEngine
                 var count = Math.Min(buffer.Length, remaining);
                 await stream.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
                 BytesWritten += count;
+                clock.MarkPayloadStarted();
+                var elapsed = clock.PayloadElapsedMilliseconds;
+                if (!fixedWindow || elapsed >= rampUpMs && elapsed <= rampUpMs + targetWindowMs)
+                    MeasurementWindowBytes += count;
                 remaining -= count;
             }
             await stream.FlushAsync(cancellationToken);
@@ -536,6 +879,31 @@ internal static class SpeedTestEngine
             WriteElapsedMs = Math.Max(1, watch.ElapsedMilliseconds);
         }
     }
+
+    private sealed class SpeedBatchClock
+    {
+        private long started;
+        private long payloadStarted;
+        private Action? onPayloadStarted;
+
+        public SpeedBatchClock(Action? onPayloadStarted = null) => this.onPayloadStarted = onPayloadStarted;
+
+        public void Start() => started = Stopwatch.GetTimestamp();
+        public long ElapsedMilliseconds => started == 0 ? 0 : (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        public long PayloadElapsedMilliseconds => payloadStarted == 0 ? 0 : (long)Stopwatch.GetElapsedTime(payloadStarted).TotalMilliseconds;
+
+        public void MarkPayloadStarted()
+        {
+            if (Interlocked.CompareExchange(ref payloadStarted, Stopwatch.GetTimestamp(), 0) != 0) return;
+            Interlocked.Exchange(ref onPayloadStarted, null)?.Invoke();
+        }
+    }
+
+    internal static int NormalizeCloudflareMeasurementSize(int requestedBytes)
+        // The public edge currently rejects many values strictly between the official
+        // 10 MB and 25 MB test points. Preserve larger calibrated requests (for example
+        // 32/64 MiB), which are accepted and prevent a short transfer on faster links.
+        => requestedBytes > 10_000_000 && requestedBytes < 25_000_000 ? 25_000_000 : requestedBytes;
 }
 
 internal sealed class SpeedMeasurementReport
@@ -546,10 +914,14 @@ internal sealed class SpeedMeasurementReport
     public DateTimeOffset StartedAt { get; init; }
     public long DurationMs { get; init; }
     public int TargetWindowMs { get; init; }
+    public int RampUpMs { get; init; }
     public int MeasurementAttempts { get; init; }
+    public int CalibrationAttempts { get; init; }
     public IReadOnlyList<int> FlowCounts { get; init; } = [];
+    public string PlanSource { get; init; } = "locally-calibrated";
     public SpeedEndpointContract Endpoint { get; init; } = new();
     public SpeedLatencySummary IdleLatency { get; init; } = new();
+    public IReadOnlyList<SpeedEndpointProbe> EndpointValidation { get; init; } = [];
     public IReadOnlyList<SpeedFlowSeries> Series { get; init; } = [];
     public SpeedClientLoad ClientLoad { get; init; } = new();
     public string Confidence { get; init; } = "unavailable";
@@ -571,9 +943,27 @@ internal sealed class SpeedEndpointContract
     public string? Download { get; init; }
     public string? Upload { get; init; }
     public string? Latency { get; init; }
+    public IReadOnlyList<string> ValidationDownload { get; init; } = [];
     public string? ContentEncoding { get; init; }
     public string? CacheBust { get; init; }
     public string? Limitation { get; init; }
+}
+
+internal sealed class SpeedEndpointProbe
+{
+    public string Name { get; init; } = "unknown";
+    public string Url { get; init; } = "unknown";
+    public bool Success { get; init; }
+    public int? StatusCode { get; init; }
+    public long Bytes { get; init; }
+    public long TotalMs { get; init; }
+    public long? TimeToFirstByteMs { get; init; }
+    public long? PayloadMs { get; init; }
+    public double? PayloadMbps { get; init; }
+    public string? HttpVersion { get; init; }
+    public string? EndpointIdentity { get; init; }
+    public string? Error { get; init; }
+    public string? Interpretation { get; init; }
 }
 
 internal sealed class SpeedFlowSeries
@@ -586,15 +976,18 @@ internal sealed class SpeedFlowSeries
     public bool ByteCapReached { get; init; }
     public int RequestedMeasurementAttempts { get; init; }
     public int SuccessfulAttempts { get; init; }
+    public SpeedBatchObservation Warmup { get; init; } = new();
     public SpeedBatchObservation Calibration { get; init; } = new();
+    public IReadOnlyList<SpeedBatchObservation> Calibrations { get; init; } = [];
     public IReadOnlyList<SpeedBatchObservation> Attempts { get; init; } = [];
     public double? RecommendedMbps { get; init; }
     public double? MedianEffectiveMbps { get; init; }
     public double? P10Mbps { get; init; }
     public double? P90Mbps { get; init; }
     public double CoefficientOfVariation { get; init; }
-    public string Confidence { get; init; } = "unavailable";
-    public IReadOnlyList<string> ConfidenceReasons { get; init; } = [];
+    public string Confidence { get; set; } = "unavailable";
+    public IReadOnlyList<string> ConfidenceReasons { get; set; } = [];
+    public IReadOnlyList<string> Classifications { get; set; } = [];
     public long ElapsedMs { get; init; }
 }
 
@@ -606,6 +999,8 @@ internal sealed class SpeedBatchObservation
     public int RequestedBytesPerFlow { get; init; }
     public int SuccessfulFlows { get; init; }
     public long TransferredBytes { get; init; }
+    public long MeasurementWindowBytes { get; init; }
+    public long? MeasurementWindowMs { get; init; }
     public long ElapsedMs { get; init; }
     public long? PayloadElapsedMs { get; init; }
     public double? EffectiveMbps { get; init; }
@@ -613,6 +1008,7 @@ internal sealed class SpeedBatchObservation
     public bool Success { get; init; }
     public IReadOnlyList<SpeedFlowObservation> FlowObservations { get; init; } = [];
     public SpeedLatencySummary LoadedLatency { get; init; } = new();
+    public IReadOnlyList<string> Classifications { get; init; } = [];
     public string? Error { get; init; }
 }
 
@@ -623,10 +1019,15 @@ internal sealed class SpeedFlowObservation
     public int? StatusCode { get; init; }
     public int RequestedBytes { get; init; }
     public long TransferredBytes { get; init; }
+    public long MeasurementWindowBytes { get; init; }
     public long ElapsedMs { get; init; }
     public long? PayloadStartMs { get; init; }
     public long? PayloadElapsedMs { get; init; }
     public long? ServerAcknowledgementMs { get; init; }
+    public bool IntentionalWindowStop { get; init; }
+    public bool? ServerAcknowledged { get; init; }
+    public string? HttpVersion { get; init; }
+    public string? EndpointIdentity { get; init; }
     public string? Error { get; init; }
 }
 
@@ -646,6 +1047,28 @@ internal sealed class SpeedPathComparison
 {
     public bool DirectControlStable { get; init; }
     public IReadOnlyList<SpeedComparisonRow> Rows { get; init; } = [];
+}
+
+internal sealed class SpeedMeasurementPlan
+{
+    private readonly Dictionary<string, int> bytes = new(StringComparer.OrdinalIgnoreCase);
+    public void SetBytes(string direction, int flows, int value) => bytes[$"{direction}:{flows}"] = value;
+    public int? GetBytes(string direction, int flows) => bytes.TryGetValue($"{direction}:{flows}", out var value) ? value : null;
+    public IReadOnlyDictionary<string, int> Workloads => bytes;
+}
+
+internal sealed record SpeedDisplaySummary(
+    double? DownloadMbps,
+    double? UploadMbps,
+    int? DownloadFlows,
+    int? UploadFlows,
+    string Confidence)
+{
+    public string ToDisplayString() =>
+        $"download={Format(DownloadMbps)} Mbit/s (flows={DownloadFlows?.ToString() ?? "n/a"}), " +
+        $"upload={Format(UploadMbps)} Mbit/s (flows={UploadFlows?.ToString() ?? "n/a"}), confidence={Confidence}";
+
+    private static string Format(double? value) => value?.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) ?? "n/a";
 }
 
 internal sealed class SpeedComparisonRow

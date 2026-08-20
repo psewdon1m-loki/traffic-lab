@@ -1,6 +1,6 @@
 param(
     [string]$XrayVersion = "25.10.15",
-    [string]$Version = "3.4.0",
+    [string]$Version = "3.5.0",
     [int]$VersionCode = 0,
     [switch]$InstallEmulator,
     [switch]$SkipTests

@@ -708,6 +708,8 @@ internal sealed class SpeedSelfTestHttpHandler : HttpMessageHandler
             var length = int.TryParse(requested, out var bytes) ? Math.Clamp(bytes, 0, 1024 * 1024) : 0;
             return new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new ByteArrayContent(new byte[length]) };
         }
+        if (request.Headers.Range is not null)
+            return new HttpResponseMessage(HttpStatusCode.PartialContent) { RequestMessage = request, Content = new ByteArrayContent(new byte[1024 * 1024]) };
         if (request.Content is not null) await request.Content.CopyToAsync(Stream.Null, cancellationToken);
         return new HttpResponseMessage(HttpStatusCode.NoContent) { RequestMessage = request };
     }

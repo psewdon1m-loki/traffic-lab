@@ -29,13 +29,18 @@ final class AndroidExtendedTestSuite {
     static JSONArray run(XrayManager xray, ConnectionParser.Profile profile, CancelCheck cancel, Progress progress) throws InterruptedException {
         JSONArray stages = new JSONArray();
         JSONObject directSpeedBefore = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.EXTENDED, cancel::check);
+        JSONObject matchedPlan = AndroidSpeedTestEngine.createPlan(directSpeedBefore);
         JSONObject tunnelSpeed = null;
+        JSONArray tunnelPasses = new JSONArray();
         XrayManager.RunSession session = null;
         try {
             cancel.check();
             session = xray.start(profile);
             Proxy proxy = httpProxy(session.httpPort);
-            tunnelSpeed = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.EXTENDED, cancel::check);
+            JSONObject tunnelFirst = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.EXTENDED, matchedPlan, cancel::check);
+            JSONObject tunnelSecond = AndroidSpeedTestEngine.measure(proxy, AndroidSpeedTestEngine.Mode.EXTENDED, matchedPlan, cancel::check);
+            tunnelPasses.put(tunnelFirst).put(tunnelSecond);
+            tunnelSpeed = AndroidSpeedTestEngine.combine(tunnelFirst, tunnelSecond);
             progress.update(12, "extended speed matrix completed");
             stages.put(coldWarm(proxy, cancel));
             progress.update(20, "cold/warm connection comparison completed");
@@ -61,16 +66,17 @@ final class AndroidExtendedTestSuite {
         }
 
         cancel.check();
-        JSONObject directSpeedAfter = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.CONTROL, cancel::check);
+        JSONObject directSpeedAfter = AndroidSpeedTestEngine.measure(null, AndroidSpeedTestEngine.Mode.EXTENDED, matchedPlan, cancel::check);
         if (tunnelSpeed == null) {
             stages.put(JsonUtil.skipped("tunnel.extended.speedMatrix", "The isolated tunnel speed session was unavailable."));
         } else {
-            JSONObject data = JsonUtil.object("directBefore", directSpeedBefore, "tunnel", tunnelSpeed,
+            JSONObject data = JsonUtil.object("sequence", "Direct-Tunnel-Tunnel-Direct", "matchedPlan", matchedPlan,
+                    "directBefore", directSpeedBefore, "tunnelPasses", tunnelPasses, "tunnel", tunnelSpeed,
                     "directAfter", directSpeedAfter,
                     "comparison", AndroidSpeedTestEngine.compare(directSpeedBefore, tunnelSpeed, directSpeedAfter));
             boolean stable = data.optJSONObject("comparison").optBoolean("directControlStable");
             stages.put(stable ? JsonUtil.passed("tunnel.extended.speedMatrix", 0, data)
-                    : JsonUtil.partial("tunnel.extended.speedMatrix", 0, "Direct control drift exceeded 25% or lacked comparable samples.", data));
+                    : JsonUtil.partial("tunnel.extended.speedMatrix", 0, "Same-flow direct control drift exceeded 15% or lacked comparable samples.", data));
         }
 
         cancel.check();

@@ -268,6 +268,9 @@ command_start() {
   printf 'Test type: %s\n' "$test_type"
   printf 'Connections tested: %s\n' "$final_completed"
   printf 'Elapsed time: %s\n' "$(format_duration "$final_elapsed")"
+  if [[ "$test_type" == "speed" && -r "$log" ]]; then
+    grep -E '^Speed result \[' "$log" || printf 'Speed result: unavailable; inspect speed.json in the result archive.\n'
+  fi
   printf 'Result archive: %s\n' "${final_archive:-not-created}"
   return "$rc"
 }

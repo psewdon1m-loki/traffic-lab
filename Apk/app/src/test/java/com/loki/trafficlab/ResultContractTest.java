@@ -66,7 +66,9 @@ public class ResultContractTest {
         assertEquals("speed-test-results", result.getString("outputType"));
         assertEquals("speed", result.getJSONObject("run").getString("testType"));
         assertEquals(1, result.getJSONArray("profiles").length());
-        assertEquals(3_000, result.getJSONObject("measurementProtocol").getInt("measurementWindowTargetMs"));
+        assertEquals(4_000, result.getJSONObject("measurementProtocol").getInt("measurementWindowTargetMs"));
+        assertEquals("ABBA Direct-Tunnel-Tunnel-Direct with the same 1/4/16-flow workload plan",
+                result.getJSONObject("measurementProtocol").getString("directControls"));
         File root = Files.createTempDirectory("tlab-android-speed-package-").toFile();
         try {
             File zip = ResultPackager.create(root, input);
@@ -82,6 +84,33 @@ public class ResultContractTest {
         ArrayList<Long> values = new ArrayList<>(Arrays.asList(10L, 20L, 30L, 40L, 50L));
         assertEquals(30L, AndroidExtendedTestSuite.percentile(values, 0.50));
         assertEquals(50L, AndroidExtendedTestSuite.percentile(values, 0.95));
+    }
+
+    @Test public void speedPlanSummaryAndDriftUseMatchedFlowContract() throws Exception {
+        JSONArray series = new JSONArray()
+                .put(JsonUtil.object("direction", "download", "flows", 1, "measurementBytesPerFlow", 1000,
+                        "medianAggregateMbps", 40.0, "confidence", "high", "classifications", new JSONArray().put("VALID")))
+                .put(JsonUtil.object("direction", "download", "flows", 4, "measurementBytesPerFlow", 2000,
+                        "medianAggregateMbps", 80.0, "confidence", "medium", "classifications", new JSONArray().put("VALID")))
+                .put(JsonUtil.object("direction", "upload", "flows", 4, "measurementBytesPerFlow", 1500,
+                        "medianAggregateMbps", 60.0, "confidence", "medium", "classifications", new JSONArray().put("VALID")));
+        JSONObject report = JsonUtil.object("series", series);
+        assertEquals(2000, AndroidSpeedTestEngine.createPlan(report).getInt("download:4"));
+        JSONObject summary = AndroidSpeedTestEngine.summary(report);
+        assertEquals(80.0, summary.getDouble("downloadMbps"), 0.01);
+        assertEquals(60.0, summary.getDouble("uploadMbps"), 0.01);
+
+        JSONObject before = JsonUtil.object("series", new JSONArray().put(JsonUtil.object("direction", "download", "flows", 1, "medianAggregateMbps", 100.0)));
+        JSONObject tunnel = JsonUtil.object("series", new JSONArray().put(JsonUtil.object("direction", "download", "flows", 1, "medianAggregateMbps", 80.0)));
+        JSONObject stableAfter = JsonUtil.object("series", new JSONArray().put(JsonUtil.object("direction", "download", "flows", 1, "medianAggregateMbps", 110.0)));
+        JSONObject driftingAfter = JsonUtil.object("series", new JSONArray().put(JsonUtil.object("direction", "download", "flows", 1, "medianAggregateMbps", 125.0)));
+        assertTrue(AndroidSpeedTestEngine.compare(before, tunnel, stableAfter).getBoolean("directControlStable"));
+        assertFalse(AndroidSpeedTestEngine.compare(before, tunnel, driftingAfter).getBoolean("directControlStable"));
+    }
+
+    @Test public void speedEndpointSizesAvoidRejectedPublicEdgeRange() {
+        assertEquals(25_000_000, AndroidSpeedTestEngine.normalizeCloudflareMeasurementSize(16 * 1024 * 1024));
+        assertEquals(64 * 1024 * 1024, AndroidSpeedTestEngine.normalizeCloudflareMeasurementSize(64 * 1024 * 1024));
     }
 
     @Test public void extendedEtaAccountsForTheFixedFiveMinuteSoak() {

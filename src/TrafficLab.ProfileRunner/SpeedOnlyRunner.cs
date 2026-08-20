@@ -35,6 +35,12 @@ internal static partial class Program
 
         var completedAt = DateTimeOffset.UtcNow;
         var passed = results.Count(item => item.Outcome.Outcome == OutcomeClassifier.Pass);
+        var summaries = results.Where(item => item.Tunnel is not null).Select(item =>
+        {
+            var value = SpeedTestEngine.Summarize(item.Tunnel!);
+            return new SpeedOnlyProfileSummary(item.ProfileId, item.Name, value.DownloadMbps, value.UploadMbps,
+                value.DownloadFlows, value.UploadFlows, value.Confidence);
+        }).ToArray();
         var runOutcome = passed > 0
             ? SpeedDecision(OutcomeClassifier.Pass, "SPEED_MEASUREMENT_SUCCEEDED", $"{passed}/{results.Count} profiles produced matched tunnel speed measurements.")
             : results.Count > 0 && results.All(item => item.Outcome.Outcome == OutcomeClassifier.TestFailure)
@@ -56,26 +62,34 @@ internal static partial class Program
                 Platform = OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : "other",
                 OperatingSystem = RuntimeInformation.OSDescription,
                 Architecture = RuntimeInformation.OSArchitecture.ToString(),
-                ToolVersion = "3.4.0",
+                ToolVersion = "3.5.0",
                 Connections = total,
                 ExecutionOrder = "sequential",
-                MeasurementContract = "direct-before and authenticated tunnel 1/4/16-flow matrices -> bounded direct-after 1-flow drift control; adaptive steady-state windows; download/upload; idle and loaded latency",
+                MeasurementContract = "ABBA Direct-Tunnel-Tunnel-Direct matched 1/4/16-flow matrices; synchronized ramp-up and bounded windows; robust three-sample calibration; download/upload; idle and loaded latency; straggler/concurrency classification",
                 NetworkContext = networkContext
             },
             Outcome = runOutcome,
             Profiles = results,
+            Summary = summaries,
             Limitations =
             [
                 "The default public speed endpoint is route-dependent; a controlled primary and neutral twin are required for server-timestamped acceptance measurements.",
                 "Client upload timing can include socket buffering. Server acknowledgement is recorded, but exact server receive timing requires a controlled endpoint.",
                 "Byte budgets can truncate high-speed paths before the target window; confidence is reduced and byteCapReached is explicit.",
-                "The direct-after control intentionally uses only one flow and fewer bytes to bound data use; 4/16-flow ratios use the direct-before matrix and inherit the 1-flow drift confidence."
+                "Direct and tunnel legs reuse the exact workload plan produced by the first direct calibration; a reached byte cap remains explicit.",
+                "Upload samples stopped by the local measurement deadline without a server response are marked UPLOAD_SERVER_ACK_UNAVAILABLE."
             ]
         };
         progress(97, total, "Speed test: creating speed.json result archive", "running", null);
         var zipPath = await CreateSpeedOnlyPackageAsync(document, options.OutputDirectory, cancellationToken);
-        progress(100, total, $"Speed test completed: {passed}/{total} profiles measured", "completed", zipPath);
+        var compactSummary = summaries.Length == 1
+            ? $"; {new SpeedDisplaySummary(summaries[0].DownloadMbps, summaries[0].UploadMbps, summaries[0].DownloadFlows, summaries[0].UploadFlows, summaries[0].Confidence).ToDisplayString()}"
+            : string.Empty;
+        progress(100, total, $"Speed test completed: {passed}/{total} profiles measured{compactSummary}", "completed", zipPath);
         Console.WriteLine($"Speed testing completed: {passed}/{total} profiles measured in {TimeSpan.FromMilliseconds(document.Run.DurationMs):c}");
+        foreach (var summary in summaries)
+            Console.WriteLine($"Speed result [{summary.ProfileId} {summary.Name}]: " +
+                new SpeedDisplaySummary(summary.DownloadMbps, summary.UploadMbps, summary.DownloadFlows, summary.UploadFlows, summary.Confidence).ToDisplayString());
         Console.WriteLine("Result archive: " + zipPath);
         return 0;
     }
@@ -114,6 +128,7 @@ internal static partial class Program
         using (var directClient = SpeedTestEngine.CreateDirectClient(options.Timeout))
             result.DirectBefore = await SpeedTestEngine.MeasureAsync(directClient, SpeedTestSettings.SpeedOnly, "direct-before", cancellationToken);
         result.Stages.Add(SpeedTestEngine.ToStage("speed.directBefore", result.DirectBefore));
+        var matchedPlan = SpeedTestEngine.CreateMatchedPlan(result.DirectBefore);
 
         progress(31, "resolving and connecting to profile endpoint");
         var dnsWatch = Stopwatch.StartNew();
@@ -161,7 +176,7 @@ internal static partial class Program
         if (tcpAvailable)
         {
             progress(37, "starting isolated Xray for authenticated speed path");
-            await MeasureSpeedTunnelAsync(profile, result, options, progress, cancellationToken);
+            await MeasureSpeedTunnelAsync(profile, result, matchedPlan, options, progress, cancellationToken);
         }
         else
         {
@@ -171,9 +186,9 @@ internal static partial class Program
             result.Stages.Add(StageResult.Skipped("speed.tunnel", "Endpoint TCP prerequisite failed."));
         }
 
-        progress(79, "measuring direct-after speed control");
+        progress(79, "ABBA direct-after matched 1/4/16-flow control");
         using (var directClient = SpeedTestEngine.CreateDirectClient(options.Timeout))
-            result.DirectAfter = await SpeedTestEngine.MeasureAsync(directClient, SpeedTestSettings.DirectAfterControl, "direct-after-control", cancellationToken);
+            result.DirectAfter = await SpeedTestEngine.MeasureAsync(directClient, SpeedTestSettings.SpeedOnly, "direct-after", cancellationToken, matchedPlan);
         result.Stages.Add(SpeedTestEngine.ToStage("speed.directAfter", result.DirectAfter));
         if (result.DirectBefore is not null && result.Tunnel is not null && result.DirectAfter is not null)
             result.Comparison = SpeedTestEngine.Compare(result.DirectBefore, result.Tunnel, result.DirectAfter);
@@ -241,6 +256,7 @@ internal static partial class Program
     private static async Task MeasureSpeedTunnelAsync(
         ConnectionProfile profile,
         SpeedOnlyProfileResult result,
+        SpeedMeasurementPlan matchedPlan,
         RunnerOptions options,
         Action<int, string> progress,
         CancellationToken cancellationToken)
@@ -288,9 +304,13 @@ internal static partial class Program
             var auth = await ProbeHttpAsync(authClient, "https://www.gstatic.com/generate_204", options.Timeout, cancellationToken);
             result.Stages.Add(StageResult.FromStatus("tunnel.authenticatedEndToEnd", auth.Success ? "passed" : "failed", auth.ElapsedMs, auth, auth.Success ? null : auth.Error ?? "No authenticated destination response."));
             if (!auth.Success) return;
-            progress(43, "measuring authenticated tunnel speed (1/4/16 flows)");
+            progress(43, "ABBA tunnel leg 1/2 (matched 1/4/16-flow plan)");
             using var speedClient = SpeedTestEngine.CreateProxyClient(httpPort, options.Timeout);
-            result.Tunnel = await SpeedTestEngine.MeasureAsync(speedClient, SpeedTestSettings.SpeedOnly, "tunnel", cancellationToken);
+            var tunnelFirst = await SpeedTestEngine.MeasureAsync(speedClient, SpeedTestSettings.SpeedOnly, "tunnel-first", cancellationToken, matchedPlan);
+            progress(61, "ABBA tunnel leg 2/2 (matched 1/4/16-flow plan)");
+            var tunnelSecond = await SpeedTestEngine.MeasureAsync(speedClient, SpeedTestSettings.SpeedOnly, "tunnel-second", cancellationToken, matchedPlan);
+            result.TunnelPasses = [tunnelFirst, tunnelSecond];
+            result.Tunnel = SpeedTestEngine.CombineReports("tunnel-abba-combined", tunnelFirst, tunnelSecond);
             result.Stages.Add(SpeedTestEngine.ToStage("speed.tunnel", result.Tunnel));
         }
         finally
@@ -339,15 +359,18 @@ internal static partial class Program
         builder.AppendLine($"Tool version: {document.Run.ToolVersion}");
         builder.AppendLine($"Connections tested: {document.Run.Connections}");
         builder.AppendLine($"Run outcome: {document.Outcome.Outcome} / {document.Outcome.ReasonCode}\n");
+        foreach (var summary in document.Summary)
+            builder.AppendLine($"Speed result [{summary.ProfileId} {summary.Name}]: download={summary.DownloadMbps?.ToString("F2", CultureInfo.InvariantCulture) ?? "n/a"} Mbit/s; upload={summary.UploadMbps?.ToString("F2", CultureInfo.InvariantCulture) ?? "n/a"} Mbit/s; confidence={summary.Confidence}");
+        builder.AppendLine();
         builder.AppendLine("FILES"); builder.AppendLine("-----");
         builder.AppendLine("speed.json  Raw calibration/measurement samples, 1/4/16-flow download/upload, idle/loaded latency, confidence and matched direct/tunnel comparison.");
         builder.AppendLine("readme.txt  Run metadata, measurement contract and limitations.\n");
         builder.AppendLine("METHOD"); builder.AppendLine("------");
         builder.AppendLine(document.Run.MeasurementContract);
-        builder.AppendLine("recommendedMbps is a median of non-calibration payload windows. effectiveMbps includes connection and server acknowledgement overhead.");
-        builder.AppendLine("A direct-control drift above 25%, insufficient duration, high sample variation, failed flows, or a reached byte budget lowers confidence.\n");
+        builder.AppendLine("recommendedMbps is a median of synchronized bounded measurement windows; warm-up and calibration samples are excluded.");
+        builder.AppendLine("Direct drift above 15%, stragglers, concurrency collapse, endpoint variation, failed flows, unacknowledged upload windows or a reached byte budget lower confidence.\n");
         builder.AppendLine("DATA BUDGET"); builder.AppendLine("-----------");
-        builder.AppendLine("The desktop/Linux worst-case transfer budget is approximately 700 MiB per profile. The direct-after control is one-flow and smaller than the full direct-before/tunnel matrices.\n");
+        builder.AppendLine("Traffic use is bounded per batch. ABBA repeats the tunnel matrix and uses a full matched direct-after matrix, so accurate SPEED mode can consume substantially more traffic than normal mode.\n");
         builder.AppendLine("PRIVACY"); builder.AppendLine("-------");
         builder.AppendLine("The archive never stores raw VLESS URIs, UUIDs, REALITY keys or short IDs. Endpoint hostnames, IP addresses, timings and throughput remain potentially sensitive.");
         return builder.ToString();
@@ -364,6 +387,7 @@ internal sealed class SpeedOnlyRunDocument
     public required SpeedOnlyRunMetadata Run { get; init; }
     public required OutcomeDecision Outcome { get; init; }
     public IReadOnlyList<SpeedOnlyProfileResult> Profiles { get; init; } = [];
+    public IReadOnlyList<SpeedOnlyProfileSummary> Summary { get; init; } = [];
     public IReadOnlyList<string> Limitations { get; init; } = [];
 }
 
@@ -395,6 +419,7 @@ internal sealed class SpeedOnlyProfileResult
     public List<StageResult> Stages { get; init; } = [];
     public SpeedMeasurementReport? DirectBefore { get; set; }
     public SpeedMeasurementReport? Tunnel { get; set; }
+    public IReadOnlyList<SpeedMeasurementReport> TunnelPasses { get; set; } = [];
     public SpeedMeasurementReport? DirectAfter { get; set; }
     public SpeedPathComparison? Comparison { get; set; }
     public OutcomeDecision Outcome { get; set; } = new()
@@ -404,3 +429,12 @@ internal sealed class SpeedOnlyProfileResult
         Reason = "Speed profile has not been classified."
     };
 }
+
+internal sealed record SpeedOnlyProfileSummary(
+    string ProfileId,
+    string Name,
+    double? DownloadMbps,
+    double? UploadMbps,
+    int? DownloadFlows,
+    int? UploadFlows,
+    string Confidence);

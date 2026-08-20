@@ -10,7 +10,7 @@ final class ProgressEstimate {
             long planned = profileCount * (AndroidExtendedTestSuite.SOAK_SECONDS + 360L) * 1000L;
             estimate = Math.max(estimate, planned - elapsedMs);
         } else if (testType != null && testType.speed() && profileCount > 0) {
-            long planned = profileCount * 240L * 1000L;
+            long planned = profileCount * 420L * 1000L;
             estimate = Math.max(estimate, planned - elapsedMs);
         }
         return Math.max(-1, estimate);

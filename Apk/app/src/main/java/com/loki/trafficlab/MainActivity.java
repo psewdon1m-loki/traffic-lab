@@ -179,7 +179,7 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
         }
         if (testType.speed()) {
             new AlertDialog.Builder(this).setTitle("Start speed test?")
-                    .setMessage("Speed test runs only relevant endpoint/authentication checks plus adaptive direct-before, tunnel and direct-after download/upload matrices with 1, 4 and 16 parallel flows. It may take several minutes per connection and can use hundreds of MB of data. Continue?")
+                    .setMessage("Speed test runs a matched Direct-Tunnel-Tunnel-Direct sequence with 1, 4 and 16 parallel flows. It may take several minutes and can use up to about 1.8 GiB per connection only when every byte cap is reached. Continue?")
                     .setNegativeButton("Cancel", null)
                     .setPositiveButton("Start speed test", (dialog, which) -> prepareStart(testType)).show();
             return;
@@ -260,9 +260,12 @@ public final class MainActivity extends Activity implements TrafficLabService.Li
     private void showResultExport(TrafficLabService.State state) {
         if (state == null || !state.completed() || latestZip == null || !latestZip.isFile()) { hideResultExport(); return; }
         String mode = state.testType.value.toUpperCase(Locale.ROOT);
+        String speedResult = state.testType.speed() && state.message.contains("\n")
+                ? "\nSpeed result:\n" + state.message.substring(state.message.indexOf('\n') + 1) + "\n" : "";
         resultExportSummary.setText(mode + " test completed.\n"
                 + "Outcome: " + state.outcome + "\n"
                 + "Reason: " + state.reasonCode + " - " + state.outcomeReason + "\n"
+                + speedResult
                 + "Connections tested: " + state.completed + "\n"
                 + "Duration: " + duration(state.durationMs) + "\n"
                 + "Archive: " + latestZip.getName() + "\n\n"

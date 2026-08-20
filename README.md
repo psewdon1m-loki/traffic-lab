@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.4.0.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.5.0.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -241,7 +241,7 @@ Android release 3.3.0 shows a persistent `Result export` card in the main screen
 only after the ZIP is ready. Save/Share can be used repeatedly; the card and
 temporary archive remain available until a new test starts or connections are
 cleared.
-Release 3.4.0 adds `SPEED TEST`/`tlab speed`/`Speed test` on Windows, Linux and
+Release 3.4.0 added `SPEED TEST`/`tlab speed`/`Speed test` on Windows, Linux and
 Android. This mode runs only speed-relevant endpoint/authentication checks and
 matched direct-before, tunnel and direct-after download/upload matrices with 1,
 4 and 16 concurrent flows. Its ZIP contains exactly `speed.json` and
@@ -250,11 +250,30 @@ uses longer adaptive transfer windows; extended mode adds the parallel speed
 matrix. Upload is incompressible and streamed through bounded buffers. Reports
 retain raw attempts, p10/median/p90, coefficient of variation, byte-cap flags,
 idle/loaded latency, bounded client CPU/memory context and direct-control drift;
-drift above 25% lowers confidence.
-The explicit speed-only suite is data-intensive but bounded: desktop/Linux use
-roughly 700 MiB per profile in the worst case and Android roughly 500 MiB. The
-direct-after drift control is intentionally one-flow; full 1/4/16 matrices are
-retained for direct-before and tunnel paths.
+  drift above 25% lowered confidence.
+Release 3.5.0 replaces the single-calibration/batch-tail estimator on all three
+platforms and in NORMAL, EXTENDED and SPEED modes. It discards warm-up, takes a
+median of repeated calibration samples, synchronizes parallel workers, bounds
+measurement windows and classifies stragglers, endpoint instability, byte caps
+and concurrency collapse. EXTENDED and SPEED use an exact matched workload in a
+Direct-Tunnel-Tunnel-Direct (ABBA) sequence; same-flow direct drift above 15%
+invalidates proxy attribution. Only SPEED prints/shows the final recommended
+download and upload values in addition to keeping the archive.
+The bounded clock starts at the first payload byte, so DNS/TCP/TLS/TTFB remain
+cold-path evidence without consuming the sustained-transfer window. Public
+Cloudflare request sizes are normalized away from edge-rejected ranges; HTTP
+403 and 429 are retained as `ENDPOINT_REQUEST_REJECTED` and
+`ENDPOINT_RATE_LIMITED`, never silently attributed to the proxy.
+Separate 1 MiB controls against Cloudflare plus OVH SBG/RBX/BHS expose
+CDN/peering bias; these geographically different paths are reported but never
+averaged into the matched primary Mbps result.
+Completed uploads use full bytes divided by server-acknowledged request time;
+without a controlled server timestamp they are explicitly classified
+`UPLOAD_ACK_BOUNDED_ESTIMATE` and capped below high confidence.
+The accurate speed-only suite is deliberately data-intensive: a desktop/Linux
+profile can approach 3.5 GiB and an Android profile about 1.8 GiB only when every
+series reaches every configured byte cap. Typical use is lower and all transfers
+remain streaming/bounded in memory.
 `STOP TEST` cancels rather than pauses: it
 terminates the current Xray process tree, removes incomplete outputs and makes
 the next START begin a new run from the first connection. Progress is deliberately labelled approximate because

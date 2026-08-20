@@ -58,10 +58,12 @@ final class ResultPackager {
     static JSONObject speedJson(PackageInput input) {
         JSONObject root = base(input, "speed-test-results");
         JsonUtil.put(root, "measurementProtocol", JsonUtil.object(
-                "calibrationExcluded", true, "measurementWindowTargetMs", 3000,
+                "warmupExcluded", true, "calibrationExcluded", true, "measurementWindowTargetMs", 4000,
                 "parallelFlowCounts", new JSONArray().put(1).put(4).put(16),
-                "directControls", "full 1/4/16 matrix before tunnel plus bounded 1-flow control after tunnel",
+                "directControls", "ABBA Direct-Tunnel-Tunnel-Direct with the same 1/4/16-flow workload plan",
+                "startSynchronization", "CountDownLatch barrier releases all workers together",
                 "statistics", new JSONArray().put("median").put("p10").put("p90").put("coefficientOfVariation"),
+                "classifications", new JSONArray().put("VALID").put("STRAGGLER_DETECTED").put("CONCURRENCY_COLLAPSE").put("ENDPOINT_UNSTABLE").put("BYTE_CAP_LIMITED"),
                 "latency", "idle and concurrent loaded HTTPS latency",
                 "uploadPayload", "incompressible generated stream with a 64 KiB buffer per flow"));
         JSONObject network = input.node.optJSONObject("connectivity");
@@ -81,10 +83,11 @@ final class ResultPackager {
         }
         JsonUtil.put(root, "profiles", profiles);
         JsonUtil.put(root, "runOutcome", input.runOutcome);
+        JsonUtil.put(root, "summary", input.runOutcome.optJSONArray("speedSummary"));
         JsonUtil.put(root, "limitations", new JSONArray()
                 .put("The public Cloudflare measurement endpoint, Android radio state, thermal/power policy and byte caps can limit the result below access-line capacity.")
-                .put("A direct-control drift above 25% makes proxy attribution low-confidence.")
-                .put("The direct-after control intentionally uses one flow to limit mobile-data use; 4/16-flow ratios use direct-before and inherit the 1-flow drift confidence.")
+                .put("A same-flow direct-control drift above 15% makes proxy attribution low-confidence.")
+                .put("Android uses a robust median-per-flow aggregate estimator and retains batch-completion throughput separately; exact server receive timestamps require a controlled endpoint.")
                 .put("The test is application-layer HTTPS capacity, not a modem PHY-rate measurement."));
         return root;
     }
@@ -103,14 +106,28 @@ final class ResultPackager {
                 + "Tool: Loki Traffic Lab Android " + BuildConfig.VERSION_NAME + "\n"
                 + "Connections tested: " + input.profiles.size() + "\n"
                 + "Run outcome: " + input.runOutcome.optString("outcome", "UNKNOWN") + " (" + input.runOutcome.optString("reasonCode", "RUN_INCONCLUSIVE") + ")\n\n"
+                + speedSummaryText(input.runOutcome.optJSONArray("speedSummary"))
                 + "FILES\n-----\n"
                 + "speed.json  Direct-before, tunnel and direct-after 1/4/16-flow measurements, raw attempts, latency-under-load, statistics and causal outcomes.\n"
                 + "readme.txt  This run metadata and method guide.\n\n"
                 + "METHOD\n------\n"
-                + "Each speed series uses a small calibration transfer followed by three adaptive measurement windows. Calibration is excluded from the reported median. Download data is discarded while reading; upload data is generated through bounded 64 KiB buffers. Reports retain median, p10, p90, coefficient of variation, cap flags, idle latency, loaded latency and direct-network drift.\n\n"
-                + "DATA BUDGET\n-----------\nThe Android worst-case transfer budget is approximately 500 MiB per profile. Actual use is usually lower because adaptive payloads stop below the cap on slower paths.\n\n"
+                + "Each series discards a warm-up, uses the median of repeated calibration transfers, starts workers through a common barrier and applies the exact direct workload plan to both tunnel legs and the final direct control. The SPEED sequence is Direct-Tunnel-Tunnel-Direct. Reports retain window and batch-completion throughput, p10/p90, variation, straggler/concurrency classifications, cap flags, loaded latency and same-flow direct drift.\n\n"
+                + "DATA BUDGET\n-----------\nThe Android theoretical cap is approximately 1.8 GiB per profile when every ABBA series reaches every byte cap. Typical use is lower; transfers use bounded streaming buffers.\n\n"
                 + "PRIVACY AND LIMITS\n------------------\n"
                 + "Raw VLESS credentials are never stored. Public/local IP metadata and optional Android device location can be sensitive. Speed tests can consume substantial mobile data. The result is application-layer HTTPS capacity to the selected public endpoint, not a guaranteed ISP or modem line rate.\n";
+    }
+
+    private static String speedSummaryText(JSONArray summaries) {
+        if (summaries == null || summaries.length() == 0) return "Speed result: unavailable\n\n";
+        StringBuilder value = new StringBuilder("SPEED RESULT\n------------\n");
+        for (int index = 0; index < summaries.length(); index++) {
+            JSONObject item = summaries.optJSONObject(index); if (item == null) continue;
+            value.append(item.optString("name", item.optString("profileId", "profile")))
+                    .append(": download=").append(String.format(Locale.ROOT, "%.2f", item.optDouble("downloadMbps"))).append(" Mbit/s; upload=")
+                    .append(String.format(Locale.ROOT, "%.2f", item.optDouble("uploadMbps"))).append(" Mbit/s; confidence=")
+                    .append(item.optString("confidence", "unknown")).append('\n');
+        }
+        return value.append('\n').toString();
     }
 
     private static JSONObject connectionJson(PackageInput input, TrafficLabRunner.ProfileResult profile, Map<String, List<String>> shared) {
