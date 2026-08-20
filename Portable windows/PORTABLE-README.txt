@@ -1,4 +1,4 @@
-Loki Traffic Lab Portable 3.5.0
+Loki Traffic Lab Portable 3.5.1
 ==============================
 
 Results preserve status and add causal outcome/reason fields at stage, profile
@@ -41,6 +41,9 @@ log classification and throughput correlation. Xray errors inside a controlled
 Firewall window are labelled expected/induced. UDP closed-pipe and association
 EOF teardown messages are labelled benign lifecycle events. Only genuinely
 unexpected markers can downgrade tunnel.logs to partial.
+Negative controls always mutate the VLESS UUID. Short-ID and SNI variants run
+only when those parameters are declared by a REALITY profile; non-applicable
+variants are recorded with reasons and cannot create false partial results.
 
 Speed reports use incompressible streaming upload with bounded 64 KiB buffers,
 discard bodies, exclude warm-up/calibration and synchronize parallel workers.

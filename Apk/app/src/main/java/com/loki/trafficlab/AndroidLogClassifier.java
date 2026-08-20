@@ -70,7 +70,9 @@ final class AndroidLogClassifier {
         }
         boolean loopbackFlow = value.matches(".*(?:write|read) tcp 127\\.0\\.0\\.1:[0-9]+->127\\.0\\.0\\.1:[0-9]+:.*");
         if (loopbackFlow && (value.contains("broken pipe") || value.contains("closed pipe")
-                || value.contains("connection reset by peer"))) {
+                || value.contains("connection reset by peer")
+                || value.contains("forcibly closed by the remote host")
+                || value.contains("aborted by the software in your host machine"))) {
             return "app_closed_loopback_request_after_completion_or_timeout";
         }
         if (value.contains("failed to handle udp input")

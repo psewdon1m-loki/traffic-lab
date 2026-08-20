@@ -1,4 +1,4 @@
-LOKI TRAFFIC LAB 3.5.0 - UBUNTU / LINUX
+LOKI TRAFFIC LAB 3.5.1 - UBUNTU / LINUX
 =======================================
 
 This directory contains the headless Linux adaptation of Traffic Lab. Ubuntu
@@ -10,11 +10,11 @@ INSTALL
 
 From a local checkout/release directory:
 
-  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.5.0.tar.gz
+  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.5.1.tar.gz
 
 For a hosted release, bootstrap also supports a one-line installation:
 
-  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.5.0.tar.gz
+  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.5.1.tar.gz
 
 The installer requires and verifies the archive SHA-256 sidecar, installs
 versioned files below /opt/tlab, creates /usr/local/bin/tlab, initializes a
@@ -90,7 +90,7 @@ bias without averaging geographically different paths into the primary result.
 Completed uploads use full server-acknowledged request duration and are labelled
 UPLOAD_ACK_BOUNDED_ESTIMATE (at most medium confidence without server timing).
 
-Traffic Lab 3.5.0 preserves status for compatibility and adds outcome,
+Traffic Lab 3.5.1 preserves status for compatibility and adds outcome,
 reasonCode and a human-readable reason to every stage, profile and run. The
 causal classes are PASS, PROXY_FAIL, UNDERLAY_FAIL, TEST_FAILURE and UNKNOWN;
 PROXY_PATH_FAIL and PROTOCOL_AUTH_FAIL distinguish endpoint reachability from
@@ -156,7 +156,7 @@ BUILD
 
 From PowerShell at the repository root:
 
-  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.5.0' -Archive
+  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.5.1' -Archive
 
 Generated releases are placed in Linux/releases. Shared C# logic remains in
 traffic-lab/src; this folder contains only Linux packaging, runtime assets and

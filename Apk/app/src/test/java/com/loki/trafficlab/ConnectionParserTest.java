@@ -35,4 +35,17 @@ public class ConnectionParserTest {
     @Test public void canonicalFingerprintMatchesDesktopV2Contract() throws Exception {
         assertEquals("f1568b5341baaddf", ConnectionParser.parse(FIRST).fingerprint());
     }
+
+    @Test public void negativeControlsOnlyMutateParametersThatAuthenticateTheProfile() throws Exception {
+        assertEquals(List.of("invalid-uuid", "invalid-short-id", "wrong-sni"),
+                TrafficLabRunner.applicableNegativeControlNames(ConnectionParser.parse(FIRST)));
+
+        String plain = "vless://11111111-2222-4333-8444-555555555555@192.0.2.10:443?encryption=none&security=none&type=tcp#plain";
+        assertEquals(List.of("invalid-uuid"),
+                TrafficLabRunner.applicableNegativeControlNames(ConnectionParser.parse(plain)));
+
+        String noShortId = FIRST.replace("&sid=abcd", "");
+        assertEquals(List.of("invalid-uuid", "wrong-sni"),
+                TrafficLabRunner.applicableNegativeControlNames(ConnectionParser.parse(noShortId)));
+    }
 }

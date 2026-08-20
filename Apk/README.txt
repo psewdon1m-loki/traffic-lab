@@ -26,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.5.0.apk
+  Apk\releases\LokiTrafficLab-android-3.5.1.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -153,7 +153,9 @@ evidence.
 
 Acceptance tests cover canonical cross-platform profile fingerprints, causal
 outcomes, benign Xray lifecycle/deprecation markers, result contracts and the
-normal/extended package split. Emulator/device runs still remain necessary for
+normal/extended package split. Negative-control applicability is explicit:
+UUID is always tested, while short-ID and SNI mutations require corresponding
+REALITY parameters. Emulator/device runs still remain necessary for
 real radio, location, VPN and end-to-end profile behavior.
 
 KNOWN GAPS

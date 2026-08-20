@@ -25,6 +25,15 @@ public class AndroidLogClassifierTest {
         assertEquals("app_closed_loopback_request_after_completion_or_timeout", marker.getString("reason"));
     }
 
+    @Test public void classifiesWindowsLoopbackReadResetAfterBoundedProbeAsBenign() throws Exception {
+        JSONObject stage = AndroidLogClassifier.stage(logs(
+                "2026/08/20 18:35:55 [Info] failed to transfer request payload > read tcp 127.0.0.1:53378->127.0.0.1:53401: wsarecv: An existing connection was forcibly closed by the remote host."));
+        assertEquals("passed", stage.getString("status"));
+        JSONObject marker = stage.getJSONObject("data").getJSONObject("logAnalysis")
+                .getJSONArray("benignMarkers").getJSONObject(0);
+        assertEquals("app_closed_loopback_request_after_completion_or_timeout", marker.getString("reason"));
+    }
+
     @Test public void classifiesCompletedUdpAssociationTeardownAsBenign() throws Exception {
         JSONObject stage = AndroidLogClassifier.stage(logs(
                 "2026/08/17 14:42:27 [Info] failed to handle UDP input > io: read/write on closed pipe"));

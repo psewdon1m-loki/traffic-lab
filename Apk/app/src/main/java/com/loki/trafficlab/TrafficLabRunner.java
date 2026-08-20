@@ -12,7 +12,6 @@ import java.net.Proxy;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -453,10 +452,16 @@ final class TrafficLabRunner {
 
     private JSONObject negativeControls(ConnectionParser.Profile profile) {
         long started = System.nanoTime(); JSONArray observations = new JSONArray(); int rejected = 0;
-        List<ConnectionParser.Profile> variants = new ArrayList<>(); List<String> names = Arrays.asList("invalid-uuid", "invalid-short-id", "wrong-sni");
-        ConnectionParser.Profile invalidUuid = profile.copy(); invalidUuid.id = UUID.randomUUID().toString(); variants.add(invalidUuid);
-        ConnectionParser.Profile invalidSid = profile.copy(); invalidSid.shortId = randomHex(Math.max(2, profile.shortId == null ? 16 : profile.shortId.length())); variants.add(invalidSid);
-        ConnectionParser.Profile invalidSni = profile.copy(); invalidSni.sni = "invalid-" + UUID.randomUUID().toString().replace("-", "") + ".invalid"; variants.add(invalidSni);
+        List<String> names = applicableNegativeControlNames(profile);
+        List<ConnectionParser.Profile> variants = new ArrayList<>();
+        for (String name : names) {
+            ConnectionParser.Profile variant = profile.copy();
+            if ("invalid-uuid".equals(name)) variant.id = UUID.randomUUID().toString();
+            else if ("invalid-short-id".equals(name)) variant.shortId = randomHex(Math.max(2, profile.shortId.length()));
+            else if ("wrong-sni".equals(name)) variant.sni = "invalid-" + UUID.randomUUID().toString().replace("-", "") + ".invalid";
+            else throw new IllegalStateException("Unknown negative-control variant: " + name);
+            variants.add(variant);
+        }
         for (int i = 0; i < variants.size(); i++) {
             JSONObject item = new JSONObject(); JsonUtil.put(item, "variant", names.get(i)); boolean success = false;
             try (XrayManager.RunSession session = xray.start(variants.get(i))) {
@@ -468,11 +473,39 @@ final class TrafficLabRunner {
             JsonUtil.put(item, "functionalRequestSucceeded", success); if (!success) rejected++; observations.put(item);
             if (canceled.get()) break;
         }
-        JSONObject data = new JSONObject(); JsonUtil.put(data, "observations", observations); JsonUtil.put(data, "expectedRejected", rejected);
-        JsonUtil.put(data, "interpretation", "One-shot invalid variants distinguish raw reachability from authenticated success; this is not credential discovery.");
+        JSONObject data = new JSONObject(); JsonUtil.put(data, "applicability", negativeControlApplicability(profile));
+        JsonUtil.put(data, "observations", observations); JsonUtil.put(data, "expectedRejected", rejected);
+        JsonUtil.put(data, "interpretation", "One-shot invalid variants distinguish raw reachability from authenticated success. UUID applies to every VLESS profile; short ID and SNI controls apply only to declared REALITY parameters.");
         return rejected == observations.length() ? JsonUtil.passed("tunnel.negativeControls", ProbeSuite.elapsed(started), data)
                 : JsonUtil.partial("tunnel.negativeControls", ProbeSuite.elapsed(started), "At least one invalid control unexpectedly completed.", data);
     }
+
+    static List<String> applicableNegativeControlNames(ConnectionParser.Profile profile) {
+        List<String> names = new ArrayList<>();
+        names.add("invalid-uuid");
+        boolean reality = "reality".equalsIgnoreCase(profile.security);
+        if (reality && present(profile.shortId)) names.add("invalid-short-id");
+        if (reality && present(profile.sni)) names.add("wrong-sni");
+        return names;
+    }
+
+    private static JSONArray negativeControlApplicability(ConnectionParser.Profile profile) {
+        boolean reality = "reality".equalsIgnoreCase(profile.security);
+        JSONArray rows = new JSONArray();
+        rows.put(JsonUtil.object("variant", "invalid-uuid", "applicable", true,
+                "reason", "The VLESS user identifier is always an authentication input."));
+        rows.put(JsonUtil.object("variant", "invalid-short-id", "applicable", reality && present(profile.shortId),
+                "reason", !reality ? "Short ID is not used when security is not REALITY."
+                        : present(profile.shortId) ? "The declared REALITY short ID is an applicable handshake control."
+                        : "The REALITY profile does not declare a short ID, so mutating one would not invalidate a supplied parameter."));
+        rows.put(JsonUtil.object("variant", "wrong-sni", "applicable", reality && present(profile.sni),
+                "reason", !reality ? "SNI is not a REALITY authentication input when security is not REALITY."
+                        : present(profile.sni) ? "The declared REALITY SNI is an applicable handshake control."
+                        : "The REALITY profile does not declare SNI, so no SNI control is attributable."));
+        return rows;
+    }
+
+    private static boolean present(String value) { return value != null && !value.trim().isEmpty(); }
 
     private JSONObject xudpControl(ConnectionParser.Profile profile) {
         long started = System.nanoTime(); JSONObject data = new JSONObject();

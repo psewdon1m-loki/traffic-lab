@@ -61,7 +61,7 @@ internal sealed class TrafficLabForm : Form
     public TrafficLabForm(bool autoStartExtended = false)
     {
         connectionFile = Path.Combine(baseDirectory, "connections.txt");
-        Text = "Loki Traffic Lab Portable 3.5.0";
+        Text = "Loki Traffic Lab Portable 3.5.1";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(820, 430);
         Size = new Size(900, 500);

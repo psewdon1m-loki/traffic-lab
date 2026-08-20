@@ -175,7 +175,7 @@ internal static partial class Program
             Tool = new ToolInfo
             {
                 Name = "Loki Traffic Lab Profile Runner",
-                Version = "3.5.0",
+                Version = "3.5.1",
                 XrayPath = Path.GetFileName(options.XrayPath),
                 XrayVersion = await ReadXrayVersionAsync(options.XrayPath, cancellationToken),
                 TimeoutSeconds = options.TimeoutSeconds,
@@ -859,12 +859,17 @@ internal static partial class Program
     private static async Task<StageResult> ProbeNegativeControlsAsync(ConnectionProfile profile, RunnerOptions options, CancellationToken cancellationToken)
     {
         var watch = Stopwatch.StartNew();
-        var variants = new[]
-        {
-            (name: "invalid-uuid", profile: profile.Copy(userId: Guid.NewGuid().ToString())),
-            (name: "invalid-short-id", profile: profile.Copy(shortId: RandomHex(Math.Max(2, profile.ShortId?.Length ?? 16)))),
-            (name: "wrong-sni", profile: profile.Copy(sni: $"invalid-{Guid.NewGuid():N}.invalid"))
-        };
+        var applicability = BuildNegativeControlApplicability(profile);
+        var variants = applicability
+            .Where(item => item.Applicable)
+            .Select(item => (name: item.Variant, profile: item.Variant switch
+            {
+                "invalid-uuid" => profile.Copy(userId: Guid.NewGuid().ToString()),
+                "invalid-short-id" => profile.Copy(shortId: RandomHex(Math.Max(2, profile.ShortId!.Length))),
+                "wrong-sni" => profile.Copy(sni: $"invalid-{Guid.NewGuid():N}.invalid"),
+                _ => throw new InvalidOperationException($"Unknown negative-control variant: {item.Variant}")
+            }))
+            .ToArray();
         var observations = new List<VariantControlObservation>();
         foreach (var variant in variants)
         {
@@ -879,12 +884,34 @@ internal static partial class Program
             watch.ElapsedMilliseconds,
             new
             {
+                applicability,
                 observations,
                 expectedRejected = observations.Count(item => !item.FunctionalRequestSucceeded),
                 unexpectedSuccesses = unexpected.Select(item => item.Variant).ToArray(),
-                interpretation = "These are one-shot negative controls for the supplied authorized profile, not credential discovery. Failure helps separate endpoint reachability from authenticated end-to-end success."
+                interpretation = "These are one-shot negative controls for the supplied authorized profile, not credential discovery. UUID applies to every VLESS profile; short ID and SNI controls apply only to declared REALITY parameters."
             },
             unexpected.Length == 0 ? null : "At least one intentionally invalid control completed a functional request; inspect server policy and the control outcome.");
+    }
+
+    private static IReadOnlyList<NegativeControlApplicability> BuildNegativeControlApplicability(ConnectionProfile profile)
+    {
+        var reality = profile.Security.Equals("reality", StringComparison.OrdinalIgnoreCase);
+        return
+        [
+            new("invalid-uuid", true, "The VLESS user identifier is always an authentication input."),
+            new("invalid-short-id", reality && !string.IsNullOrWhiteSpace(profile.ShortId),
+                reality
+                    ? string.IsNullOrWhiteSpace(profile.ShortId)
+                        ? "The REALITY profile does not declare a short ID, so mutating one would not invalidate a supplied parameter."
+                        : "The declared REALITY short ID is an applicable handshake control."
+                    : "Short ID is not used when security is not REALITY."),
+            new("wrong-sni", reality && !string.IsNullOrWhiteSpace(profile.Sni),
+                reality
+                    ? string.IsNullOrWhiteSpace(profile.Sni)
+                        ? "The REALITY profile does not declare SNI, so no SNI control is attributable."
+                        : "The declared REALITY SNI is an applicable handshake control."
+                    : "SNI is not a REALITY authentication input when security is not REALITY.")
+        ];
     }
 
     private static async Task<StageResult> ProbeXudpCompatibilityAsync(ConnectionProfile profile, RunnerOptions options, CancellationToken cancellationToken)
@@ -2350,7 +2377,7 @@ internal static partial class Program
             || line.Contains("failed to read http request > EOF", StringComparison.OrdinalIgnoreCase)
             || line.Contains("connection ends > EOF", StringComparison.OrdinalIgnoreCase)
             || line.Contains("websocket: close 1000", StringComparison.OrdinalIgnoreCase)
-            || Regex.IsMatch(line, @"(?:wsasend|send|write) tcp 127\.0\.0\.1:\d+->127\.0\.0\.1:\d+:.*(?:aborted by the software|operation.*aborted|broken pipe|connection reset)", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(line, @"(?:wsasend|wsarecv|send|read|write) tcp 127\.0\.0\.1:\d+->127\.0\.0\.1:\d+:.*(?:aborted by the software|forcibly closed by the remote host|operation.*aborted|broken pipe|connection reset)", RegexOptions.IgnoreCase)
             || Regex.IsMatch(line, @"(?:websocket|grpc).*(?:deprecated|legacy transport)", RegexOptions.IgnoreCase)
             || Regex.IsMatch(line, @"XTLS.*rejected UDP/443 traffic", RegexOptions.IgnoreCase);
 
@@ -2818,6 +2845,17 @@ internal static partial class Program
         Assert(parsed.Port == 443, "VLESS port parsing failed.");
         Assert(parsed.Security == "reality", "VLESS security parsing failed.");
         Assert(parsed.Sni == "www.example.com", "VLESS SNI parsing failed.");
+        var realityControls = BuildNegativeControlApplicability(parsed);
+        Assert(realityControls.Count == 3 && realityControls.All(item => item.Applicable),
+            "A complete REALITY profile must enable UUID, short-ID and SNI negative controls.");
+        var plainProfile = ConnectionProfile.Parse("vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=none&type=tcp#Plain");
+        var plainControls = BuildNegativeControlApplicability(plainProfile);
+        Assert(plainControls.Single(item => item.Variant == "invalid-uuid").Applicable
+            && plainControls.Where(item => item.Variant is "invalid-short-id" or "wrong-sni").All(item => !item.Applicable),
+            "Non-REALITY profiles must not run short-ID or SNI negative controls.");
+        var realityWithoutShortId = ConnectionProfile.Parse("vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=reality&type=tcp&sni=www.example.com&pbk=test-key#NoSid");
+        Assert(!BuildNegativeControlApplicability(realityWithoutShortId).Single(item => item.Variant == "invalid-short-id").Applicable,
+            "A missing REALITY short ID must be reported as non-applicable instead of being invented for a negative control.");
         var declaredJson = JsonSerializer.Serialize(parsed.ToDeclaredProfile(), JsonOptions);
         Assert(!declaredJson.Contains("11111111", StringComparison.Ordinal), "Declared profile leaks UUID.");
         Assert(!declaredJson.Contains("test-key", StringComparison.Ordinal), "Declared profile leaks REALITY public key/password.");
@@ -2907,7 +2945,7 @@ internal static partial class Program
             ExtendedTest = new ExtendedTestMetadata { Enabled = true, Elevated = false, SoakDurationSeconds = 300, ParallelFlows = 20, NetworkLossSeconds = 5 },
             NetworkLabel = "self-test",
             TestContext = new TestContext { NodeId = "self-test-pc" },
-            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.5.0", XrayPath = "xray.exe", XrayVersion = "self-test" },
+            Tool = new ToolInfo { Name = "Loki Traffic Lab Profile Runner", Version = "3.5.1", XrayPath = "xray.exe", XrayVersion = "self-test" },
             Input = new InputSummary { LoadedConnections = 1, ScheduledConnections = 1 },
             Environment = new NetworkEnvironment()
         };
@@ -2981,7 +3019,7 @@ internal static partial class Program
                 {
                     RunId = "speed-selftest-12345678", StartedAt = DateTimeOffset.UtcNow,
                     CompletedAt = DateTimeOffset.UtcNow, DurationMs = 1, Platform = expectedPlatform,
-                    OperatingSystem = RuntimeInformation.OSDescription, ToolVersion = "3.5.0", Connections = 1
+                    OperatingSystem = RuntimeInformation.OSDescription, ToolVersion = "3.5.1", Connections = 1
                 },
                 Outcome = new OutcomeDecision { Outcome = OutcomeClassifier.Pass, ReasonCode = "SELF_TEST", Reason = "Package contract check." },
                 Profiles = [new SpeedOnlyProfileResult { ProfileId = "profile-01", Ordinal = 1, Name = "self-test" }]
@@ -3034,16 +3072,17 @@ internal static partial class Program
             var expectedWindow = new ExpectedFailureWindow(expectedAt.ToUniversalTime() - TimeSpan.FromSeconds(1), expectedAt.ToUniversalTime() + TimeSpan.FromSeconds(1), "controlled_network_interruption");
             var inducedLine = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Info] app/proxyman/outbound: failed to process outbound traffic > failed to find an available destination > connectex: forbidden by its access permissions";
             var benignLine = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Info] transport/internet/udp: failed to handle UDP input > io: read/write on closed pipe";
+            var benignLoopbackReadReset = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Info] app/proxyman/outbound: failed to transfer request payload > read tcp 127.0.0.1:53378->127.0.0.1:53401: wsarecv: An existing connection was forcibly closed by the remote host.";
             var errorPath = Path.Combine(logClassifierRoot, "error.log");
             var normalWebSocketClose = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Error] websocket: close 1000 (normal)";
             var deprecatedTransport = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Warning] WebSocket transport is deprecated";
             var quicPolicy = expectedAt.ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Error] XTLS rejected UDP/443 traffic";
-            File.WriteAllLines(errorPath, [inducedLine, benignLine, normalWebSocketClose, deprecatedTransport, quicPolicy]);
+            File.WriteAllLines(errorPath, [inducedLine, benignLine, benignLoopbackReadReset, normalWebSocketClose, deprecatedTransport, quicPolicy]);
             var classifiedLogs = BuildCoreLogStage(Path.Combine(logClassifierRoot, "access.log"), errorPath, "", "", [expectedWindow]);
             var classifiedData = JsonSerializer.SerializeToElement(classifiedLogs.Data, JsonOptions);
             Assert(classifiedLogs.Status == "passed", "An induced firewall failure incorrectly downgraded tunnel.logs.");
             Assert(classifiedData.GetProperty("classificationSummary").GetProperty("expectedOrInduced").GetInt32() == 1
-                && classifiedData.GetProperty("classificationSummary").GetProperty("benignLifecycle").GetInt32() == 4
+                && classifiedData.GetProperty("classificationSummary").GetProperty("benignLifecycle").GetInt32() == 5
                 && classifiedData.GetProperty("classificationSummary").GetProperty("unexpected").GetInt32() == 0,
                 "Core-log expected/benign/unexpected classification is incorrect.");
             var unexpectedLine = expectedAt.AddMinutes(1).ToString("yyyy/MM/dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + " [Error] failed to dial: connection refused";
@@ -3669,6 +3708,7 @@ internal sealed record TunnelDownloadObservation(
     string? Error);
 internal sealed record ExitIpObservation(string Service, string? Ip, bool Valid, long ElapsedMs, string? Error);
 internal sealed record ProcessResult(int ExitCode, string Stdout, string Stderr, long ElapsedMs);
+internal sealed record NegativeControlApplicability(string Variant, bool Applicable, string Reason);
 internal sealed record VariantControlObservation(string Variant, bool CoreStarted, bool FunctionalRequestSucceeded, string Outcome, long ElapsedMs, string? Error);
 internal sealed record Inference(string Key, string Value, string Confidence, string Reason);
 internal sealed record HostnameGroup(string HostA, string HostB, IReadOnlyList<string> SharedIps);

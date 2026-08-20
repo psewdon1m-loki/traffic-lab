@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.5.0.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.5.1.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -250,8 +250,8 @@ uses longer adaptive transfer windows; extended mode adds the parallel speed
 matrix. Upload is incompressible and streamed through bounded buffers. Reports
 retain raw attempts, p10/median/p90, coefficient of variation, byte-cap flags,
 idle/loaded latency, bounded client CPU/memory context and direct-control drift;
-  drift above 25% lowered confidence.
-Release 3.5.0 replaces the single-calibration/batch-tail estimator on all three
+drift above 15% lowers confidence.
+Release 3.5.1 uses the multi-calibration/windowed estimator on all three
 platforms and in NORMAL, EXTENDED and SPEED modes. It discards warm-up, takes a
 median of repeated calibration samples, synchronizes parallel workers, bounds
 measurement windows and classifies stragglers, endpoint instability, byte caps

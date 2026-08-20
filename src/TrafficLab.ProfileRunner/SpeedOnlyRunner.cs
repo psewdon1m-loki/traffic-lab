@@ -62,7 +62,7 @@ internal static partial class Program
                 Platform = OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : "other",
                 OperatingSystem = RuntimeInformation.OSDescription,
                 Architecture = RuntimeInformation.OSArchitecture.ToString(),
-                ToolVersion = "3.5.0",
+                ToolVersion = "3.5.1",
                 Connections = total,
                 ExecutionOrder = "sequential",
                 MeasurementContract = "ABBA Direct-Tunnel-Tunnel-Direct matched 1/4/16-flow matrices; synchronized ramp-up and bounded windows; robust three-sample calibration; download/upload; idle and loaded latency; straggler/concurrency classification",
