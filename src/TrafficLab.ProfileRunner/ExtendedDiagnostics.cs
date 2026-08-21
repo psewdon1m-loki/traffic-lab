@@ -546,9 +546,8 @@ internal static class ExtendedDiagnostics
         }
     }
 
-    public static async Task<StageResult> ProbeControlledCanaryAsync(HttpClient client, string urlTemplate, string profileFingerprint, TimeSpan timeout)
+    public static async Task<StageResult> ProbeControlledCanaryAsync(HttpClient client, string urlTemplate, string profileFingerprint, string correlationId, TimeSpan timeout)
     {
-        var correlationId = $"{profileFingerprint}-{Guid.NewGuid():N}";
         var url = urlTemplate.Replace("{id}", correlationId, StringComparison.OrdinalIgnoreCase)
             .Replace("{profile}", profileFingerprint, StringComparison.OrdinalIgnoreCase);
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
@@ -559,7 +558,7 @@ internal static class ExtendedDiagnostics
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            request.Headers.TryAddWithoutValidation("X-Traffic-Lab-Correlation", correlationId);
+            request.Headers.TryAddWithoutValidation("X-Traffic-Lab-Correlation-Id", correlationId);
             using var cancellation = new CancellationTokenSource(timeout);
             using var response = await client.SendAsync(request, cancellation.Token);
             var body = await response.Content.ReadAsStringAsync(cancellation.Token);

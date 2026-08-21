@@ -44,22 +44,24 @@ internal static partial class Program
         progress?.Invoke(98, "extended: forced Xray restart and reconnect");
         stages.Add(await ProbeCoreReconnectAsync(profile, options, cancellationToken));
 
-        progress?.Invoke(99, "extended: process-scoped network interruption");
-        stages.Add(await ProbeControlledNetworkInterruptionAsync(httpPort, xrayProcessId, options, cancellationToken));
-        return stages;
-    }
-
-    private static Task<StageResult> ProbeControlledNetworkInterruptionAsync(
-        int httpPort,
-        int xrayProcessId,
-        RunnerOptions options,
-        CancellationToken cancellationToken)
-    {
         if (OperatingSystem.IsWindows())
-            return ProbeWindowsFirewallInterruptionAsync(httpPort, options, cancellationToken);
-        if (OperatingSystem.IsLinux())
-            return ProbeLinuxProcessPauseAsync(httpPort, xrayProcessId, options, cancellationToken);
-        return Task.FromResult(StageResult.Skipped("tunnel.extended.networkInterruption", "A safe process-scoped interruption is not implemented for this operating system."));
+        {
+            progress?.Invoke(99, "extended: process-scoped network transport interruption");
+            stages.Add(await ProbeWindowsFirewallInterruptionAsync(httpPort, options, cancellationToken));
+            stages.Add(StageResult.ControlNotApplicable("tunnel.extended.processSuspendResume", "SIGSTOP/SIGCONT process suspension is a Linux control and was not run on Windows."));
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            progress?.Invoke(99, "extended: Xray process suspend/resume");
+            stages.Add(await ProbeLinuxProcessPauseAsync(httpPort, xrayProcessId, options, cancellationToken));
+            stages.Add(StageResult.ControlNotApplicable("tunnel.extended.networkTransportInterruption", "No Linux network transport outage is injected; SIGSTOP/SIGCONT is reported separately as processSuspendResume."));
+        }
+        else
+        {
+            stages.Add(StageResult.Skipped("tunnel.extended.processSuspendResume", "Process suspension is unsupported on this operating system."));
+            stages.Add(StageResult.Skipped("tunnel.extended.networkTransportInterruption", "A safe network transport interruption is unsupported on this operating system."));
+        }
+        return stages;
     }
 
     private static async Task<StageResult> ProbeColdWarmAsync(
@@ -419,13 +421,13 @@ internal static partial class Program
         CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows())
-            return StageResult.Skipped("tunnel.extended.networkInterruption", "Process-scoped Windows Firewall interruption is available on Windows only.");
+            return StageResult.Skipped("tunnel.extended.networkTransportInterruption", "Process-scoped Windows Firewall interruption is available on Windows only.");
         if (!IsCurrentProcessElevated())
-            return StageResult.Skipped("tunnel.extended.networkInterruption", "Administrator elevation was not granted; no firewall state was changed.");
+            return StageResult.Skipped("tunnel.extended.networkTransportInterruption", "Administrator elevation was not granted; no firewall state was changed.");
 
         var netsh = Path.Combine(Environment.SystemDirectory, "netsh.exe");
         if (!File.Exists(netsh))
-            return StageResult.Skipped("tunnel.extended.networkInterruption", "The Windows netsh firewall tool is unavailable.");
+            return StageResult.Skipped("tunnel.extended.networkTransportInterruption", "The Windows netsh firewall tool is unavailable.");
 
         var watch = Stopwatch.StartNew();
         var ruleName = TemporaryFirewallRule;
@@ -447,7 +449,7 @@ internal static partial class Program
                 TimeSpan.FromSeconds(10),
                 cancellationToken);
             if (add.ExitCode != 0)
-                return StageResult.Failed("tunnel.extended.networkInterruption", add.ElapsedMs, "Windows Firewall rejected the temporary process-scoped block rule.", new { add.ExitCode, stderr = Truncate(Redact(add.Stderr), 500) });
+                return StageResult.Failed("tunnel.extended.networkTransportInterruption", add.ElapsedMs, "Windows Firewall rejected the temporary process-scoped block rule.", new { add.ExitCode, stderr = Truncate(Redact(add.Stderr), 500) });
 
             failureWindowStartedAt = DateTimeOffset.UtcNow;
             await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
@@ -486,10 +488,10 @@ internal static partial class Program
         var recovered = recoveryAttempts.Any(item => item.Success);
         var removed = remove?.ExitCode == 0;
         return StageResult.FromStatus(
-            "tunnel.extended.networkInterruption",
+            "tunnel.extended.networkTransportInterruption",
             interruptionObserved && recovered && removed ? "passed" : recovered && removed ? "partial" : "failed",
             watch.ElapsedMilliseconds,
-            new NetworkInterruptionEvidence
+            new ControlledInterruptionEvidence
             {
                 Scope = "outbound Windows Firewall block for the bundled Traffic Lab xray.exe path only",
                 RequestedInterruptionSeconds = options.NetworkLossSeconds,
@@ -519,17 +521,17 @@ internal static partial class Program
         const int SigStop = 19;
         const int SigCont = 18;
         if (xrayProcessId <= 0)
-            return StageResult.Skipped("tunnel.extended.networkInterruption", "The Traffic Lab Xray process ID was unavailable.");
+            return StageResult.Skipped("tunnel.extended.processSuspendResume", "The Traffic Lab Xray process ID was unavailable.");
 
         try
         {
             using var xray = Process.GetProcessById(xrayProcessId);
             if (xray.HasExited)
-                return StageResult.Skipped("tunnel.extended.networkInterruption", "The Traffic Lab Xray process had already exited.");
+                return StageResult.Skipped("tunnel.extended.processSuspendResume", "The Traffic Lab Xray process had already exited.");
         }
         catch (Exception ex)
         {
-            return StageResult.Skipped("tunnel.extended.networkInterruption", "The Traffic Lab Xray process could not be inspected: " + Redact(ex.Message));
+            return StageResult.Skipped("tunnel.extended.processSuspendResume", "The Traffic Lab Xray process could not be inspected: " + Redact(ex.Message));
         }
 
         var watch = Stopwatch.StartNew();
@@ -547,7 +549,7 @@ internal static partial class Program
             {
                 var errno = Marshal.GetLastPInvokeError();
                 return StageResult.Failed(
-                    "tunnel.extended.networkInterruption",
+                    "tunnel.extended.processSuspendResume",
                     watch.ElapsedMilliseconds,
                     $"Linux rejected SIGSTOP for the isolated Traffic Lab Xray process (errno {errno}).",
                     new { xrayProcessId, stopResult, errno });
@@ -584,10 +586,10 @@ internal static partial class Program
         var recovered = recoveryAttempts.Any(item => item.Success);
         var resumed = continueResult == 0;
         return StageResult.FromStatus(
-            "tunnel.extended.networkInterruption",
+            "tunnel.extended.processSuspendResume",
             interruptionObserved && recovered && resumed ? "passed" : recovered && resumed ? "partial" : "failed",
             watch.ElapsedMilliseconds,
-            new NetworkInterruptionEvidence
+            new ControlledInterruptionEvidence
             {
                 Scope = "SIGSTOP/SIGCONT applied only to the Xray process started by this Traffic Lab profile",
                 RequestedInterruptionSeconds = options.NetworkLossSeconds,
@@ -669,7 +671,7 @@ internal sealed record ParallelUdpObservation(int Flow, string Resolver, bool Su
 internal sealed record SoakObservation(int Sequence, DateTimeOffset StartedAt, bool Success, long LatencyMs, int? StatusCode, string? Error);
 internal sealed record ExpectedFailureWindow(DateTimeOffset StartedAt, DateTimeOffset EndedAt, string Reason);
 
-internal sealed class NetworkInterruptionEvidence
+internal sealed class ControlledInterruptionEvidence
 {
     public string Scope { get; init; } = "unknown";
     public int RequestedInterruptionSeconds { get; init; }

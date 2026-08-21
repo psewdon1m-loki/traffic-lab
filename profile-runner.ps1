@@ -26,7 +26,7 @@ $toolPath = Join-Path $outputPath "profile-runner-tool"
 $toolDll = Join-Path $toolPath "LokiTrafficLab.dll"
 
 function Find-Dotnet {
-    $bundled = Join-Path $repoRoot "client_pc\.dotnet\dotnet.exe"
+    $bundled = Join-Path $repoRoot "client\win\.dotnet\dotnet.exe"
     if (Test-Path -LiteralPath $bundled) {
         return $bundled
     }
@@ -36,7 +36,7 @@ function Find-Dotnet {
         return $command.Source
     }
 
-    throw "A .NET 8 SDK is required. The bundled client_pc\.dotnet runtime was not found."
+    throw "A .NET 8 SDK is required. The bundled client\win\.dotnet runtime was not found."
 }
 
 function Find-Xray {
@@ -49,7 +49,7 @@ function Find-Xray {
 
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "LokiClient\runtime\xray.exe"),
-        (Join-Path $repoRoot "client_pc\src\Client.App.Win\Assets\xray\xray.exe"),
+        (Join-Path $repoRoot "client\win\src\Client.App.Win\Assets\xray\xray.exe"),
         (Join-Path $PSScriptRoot "Portable windows\vendor\v2rayN-windows-64\bin\xray\xray.exe")
     )
 

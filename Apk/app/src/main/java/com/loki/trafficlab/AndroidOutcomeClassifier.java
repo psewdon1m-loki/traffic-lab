@@ -26,9 +26,9 @@ final class AndroidOutcomeClassifier {
             return decision(TEST_FAILURE, "TESTER_OR_CONFIGURATION_FAILURE",
                     "The tester could not parse, validate, or start the isolated client core; the proxy path was not fairly evaluated.", firstFailure(stages));
         }
-        if (failed(stages, "endpoint.dns")) return decision(PROXY_FAIL, "PROXY_ENDPOINT_DNS_FAIL",
+        if (failed(stages, "endpoint.dns")) return decision(PROXY_FAIL, "ENDPOINT_DNS_UNRESOLVED",
                 "The direct control worked, but the profile endpoint did not resolve on this underlay.", "endpoint.dns");
-        if (failed(stages, "endpoint.tcp")) return decision(PROXY_FAIL, "PROXY_PATH_FAIL",
+        if (failed(stages, "endpoint.tcp")) return decision(PROXY_FAIL, "ENDPOINT_TCP_UNREACHABLE",
                 "The direct control worked, but no TCP connection to the profile endpoint succeeded.", "endpoint.tcp");
         if (passed(stages, "tunnel.authenticatedEndToEnd")) return decision(PASS, "AUTHENTICATED_E2E_SUCCEEDED",
                 "At least one authenticated destination request completed through the tested profile.", "tunnel.authenticatedEndToEnd");
@@ -68,16 +68,20 @@ final class AndroidOutcomeClassifier {
             if ("passed".equals(status)) { set(stage, PASS, "CHECK_SUCCEEDED", "The stage success criterion was directly observed."); continue; }
             if ("skipped".equals(status)) {
                 String normalizedError = error.toLowerCase(Locale.ROOT);
-                String code = "UNSUPPORTED_ON_PLATFORM".equals(stage.optString("reasonCode")) ? "UNSUPPORTED_ON_PLATFORM"
+                String declaredCode = stage.optString("reasonCode");
+                String code = "UNSUPPORTED_ON_PLATFORM".equals(declaredCode) || "DEPENDENCY_NOT_MET".equals(declaredCode) || "NOT_APPLICABLE".equals(declaredCode) || "CONTROL_NOT_APPLICABLE".equals(declaredCode) ? declaredCode
                         : normalizedError.contains("did not") || normalizedError.contains("unavailable") ? "DEPENDENCY_NOT_MET" : "NOT_REQUESTED_OR_NOT_APPLICABLE";
                 set(stage, UNKNOWN, code, error.isEmpty() ? "The stage was not executed." : error); continue;
+            }
+            if ("INVALID_TRACEROUTE_OUTPUT".equals(stage.optString("reasonCode"))) {
+                set(stage, TEST_FAILURE, "INVALID_TRACEROUTE_OUTPUT", error); continue;
             }
             if (!directControlAvailable && remote(name)) { set(stage, UNDERLAY_FAIL, "DIRECT_CONTROL_UNAVAILABLE", "The no-proxy control was unavailable, so this remote result cannot be attributed to the profile."); continue; }
             if (name.equals("profile.parse") || name.equals("profile.policy") || name.equals("tunnel.coreValidation") || name.equals("tunnel.coreStart") || name.equals("tunnel.unhandled")) {
                 set(stage, TEST_FAILURE, "TESTER_OR_CONFIGURATION_FAILURE", error); continue;
             }
-            if (name.equals("endpoint.tcp")) { set(stage, PROXY_FAIL, "PROXY_PATH_FAIL", error); continue; }
-            if (name.equals("endpoint.dns")) { set(stage, PROXY_FAIL, "PROXY_ENDPOINT_DNS_FAIL", error); continue; }
+            if (name.equals("endpoint.tcp")) { set(stage, PROXY_FAIL, "ENDPOINT_TCP_UNREACHABLE", error); continue; }
+            if (name.equals("endpoint.dns")) { set(stage, PROXY_FAIL, "ENDPOINT_DNS_UNRESOLVED", error); continue; }
             if (name.equals("tunnel.authenticatedEndToEnd")) { set(stage, PROXY_FAIL, "PROTOCOL_AUTH_FAIL", error); continue; }
             if (remote(name)) { set(stage, "partial".equals(status) ? UNKNOWN : PROXY_FAIL,
                     "partial".equals(status) ? "INCONCLUSIVE_REMOTE_CHECK" : "PROXY_SUBCHECK_FAIL", error); continue; }

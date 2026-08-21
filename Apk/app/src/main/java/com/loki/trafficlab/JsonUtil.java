@@ -33,9 +33,13 @@ final class JsonUtil {
 
     static JSONObject stage(String name, String status, long elapsedMs, Object data, String error) {
         JSONObject stage = new JSONObject();
+        Instant completedAt = Instant.now();
+        Instant startedAt = completedAt.minusMillis(Math.max(0, elapsedMs));
         put(stage, "stage", name);
         put(stage, "status", status);
         put(stage, "elapsedMs", elapsedMs);
+        put(stage, "startedAt", startedAt.toString());
+        put(stage, "completedAt", completedAt.toString());
         put(stage, "data", data);
         put(stage, "error", error);
         if ("passed".equals(status)) {
@@ -58,6 +62,30 @@ final class JsonUtil {
     static JSONObject failed(String name, long elapsedMs, String error, Object data) { return stage(name, "failed", elapsedMs, data, error); }
     static JSONObject partial(String name, long elapsedMs, String error, Object data) { return stage(name, "partial", elapsedMs, data, error); }
     static JSONObject skipped(String name, String reason) { return stage(name, "skipped", 0, null, reason); }
+    static JSONObject notApplicable(String name, String reason) {
+        JSONObject value = stage(name, "skipped", 0, null, reason);
+        put(value, "reasonCode", "NOT_APPLICABLE");
+        return value;
+    }
+    static JSONObject controlNotApplicable(String name, String reason) {
+        JSONObject value = stage(name, "skipped", 0, null, reason);
+        put(value, "reasonCode", "CONTROL_NOT_APPLICABLE");
+        return value;
+    }
+    static JSONObject dependentSkipped(String name, String reason, String dependsOn, String rootFailureCode) {
+        JSONObject value = stage(name, "skipped", 0, null, reason);
+        put(value, "reasonCode", "DEPENDENCY_NOT_MET");
+        put(value, "dependsOn", dependsOn);
+        put(value, "rootFailureCode", rootFailureCode);
+        return value;
+    }
+    static JSONObject testFailure(String name, long elapsedMs, String reasonCode, String error, Object data) {
+        JSONObject value = stage(name, "failed", elapsedMs, data, error);
+        put(value, "outcome", "TEST_FAILURE");
+        put(value, "reasonCode", reasonCode);
+        put(value, "reason", error);
+        return value;
+    }
     static JSONObject unsupported(String name, String reason, Object data) {
         JSONObject value = stage(name, "skipped", 0, data, reason);
         put(value, "reasonCode", "UNSUPPORTED_ON_PLATFORM");

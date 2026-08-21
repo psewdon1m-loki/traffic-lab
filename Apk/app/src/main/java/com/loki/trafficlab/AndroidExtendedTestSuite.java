@@ -84,7 +84,9 @@ final class AndroidExtendedTestSuite {
         progress.update(92, "forced reconnect completed");
         cancel.check();
         stages.put(restartRecovery(xray, profile, INTERRUPTION_SECONDS * 1000L,
-                "tunnel.extended.networkInterruption", "controlled_xray_process_stop", cancel));
+                "tunnel.extended.processRestartInterruption", "controlled_xray_process_stop_and_fresh_start", cancel));
+        stages.put(JsonUtil.controlNotApplicable("tunnel.extended.processSuspendResume", "Android does not expose a safe app-local SIGSTOP/SIGCONT control; process stop/restart is reported separately."));
+        stages.put(JsonUtil.controlNotApplicable("tunnel.extended.networkTransportInterruption", "Traffic Lab does not disable Android radios or mutate device routes; no network transport outage was injected."));
         progress.update(100, "process-scoped interruption recovery completed");
         return stages;
     }

@@ -26,7 +26,7 @@ pinned official Xray Android binaries, verifies Xray's published SHA2-256
 digests, runs JVM unit tests and Android lint, and builds a debug-signed APK.
 Nothing is installed system-wide. Output:
 
-  Apk\releases\LokiTrafficLab-android-3.5.1.apk
+  Apk\releases\LokiTrafficLab-android-3.6.0.apk
 
 For emulator tooling and the smaller base API 35 x86_64 system image:
 
@@ -135,8 +135,16 @@ denial is recorded and does not abort the test.
 Every stage keeps the compatibility status field and also records a causal
 outcome, reasonCode and explanation. Profile/run outcomes are PASS, PROXY_FAIL,
 UNDERLAY_FAIL, TEST_FAILURE or UNKNOWN. A reachable direct control followed by
-endpoint TCP failure is PROXY_FAIL/PROXY_PATH_FAIL; reachable endpoint TCP
+endpoint TCP failure is PROXY_FAIL/ENDPOINT_TCP_UNREACHABLE; reachable endpoint TCP
 followed by failed authenticated traffic is PROXY_FAIL/PROTOCOL_AUTH_FAIL.
+Endpoint DNS failure is ENDPOINT_DNS_UNRESOLVED. Downstream TLS/auth/exit/DNS,
+UDP, QUIC and payload stages are SKIPPED/DEPENDENCY_NOT_MET and retain the root
+stage/code instead of being reported as independent failures. Negative controls
+that do not apply to the profile are SKIP/CONTROL_NOT_APPLICABLE.
+
+Schema 1.1 includes profile/stage UTC timing and a per-profile correlation ID
+sent on authenticated HTTP controls. Without an authorized server log the
+server-correlation state remains client-generated/unconfirmed.
 
 COVERAGE ESTIMATE
 -----------------
@@ -162,7 +170,10 @@ KNOWN GAPS
 ----------
 
 Android does not offer reliable unprivileged DF/ICMP path-MTU or full traceroute
-on every vendor build. This APK also does not embed a second native QUIC engine,
+on every vendor build. The ping TTL parser only accepts responder lines and
+rejects a destination reported as ttl-expired or the same ttl-expired responder
+for three consecutive hops as TEST_FAILURE/INVALID_TRACEROUTE_OUTPUT. This APK
+also does not embed a second native QUIC engine,
 so QUIC is reported as unavailable while real UDP and XUDP remain tested.
 The APK deliberately uses explicit app-local proxies and does not create a
 VpnService/TUN, so it tests the supplied profiles rather than device-wide split

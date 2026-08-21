@@ -240,7 +240,7 @@ internal static class LabCommands
 
     private static void PrintHelp()
     {
-        Console.WriteLine("Loki Traffic Lab 3.5 - portable distributed black-box network laboratory");
+        Console.WriteLine("Loki Traffic Lab 3.6 - portable distributed black-box network laboratory");
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  run [--connections connections.txt] [--plan plan.json] [--xray xray.exe] [--outdir artifacts]");

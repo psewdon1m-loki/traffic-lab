@@ -2,7 +2,7 @@ plugins {
     id 'com.android.application'
 }
 
-def trafficLabVersionName = providers.environmentVariable('TLAB_VERSION_NAME').orElse('3.5.1').get()
+def trafficLabVersionName = providers.environmentVariable('TLAB_VERSION_NAME').orElse('3.6.0').get()
 def trafficLabVersionCode = providers.environmentVariable('TLAB_VERSION_CODE').orElse('3005001').get().toInteger()
 if (!(trafficLabVersionName ==~ /[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/)) {
     throw new GradleException("TLAB_VERSION_NAME must be a semantic version, got: ${trafficLabVersionName}")

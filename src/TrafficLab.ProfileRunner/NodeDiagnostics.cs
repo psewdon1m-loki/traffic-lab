@@ -128,7 +128,7 @@ internal static class NodeDiagnostics
         builder.AppendLine("# Traffic Lab OSI evidence map").AppendLine();
         builder.AppendLine($"Generated: `{map.GeneratedAt:O}`  ");
         builder.AppendLine($"Test node: `{Text(report.TestContext.NodeId)}` / `{Text(report.NetworkLabel)}`  ");
-        builder.AppendLine($"Test type: `{Text(report.TestType.ToUpperInvariant())}`; extended settings: soak `{report.ExtendedTest.SoakDurationSeconds?.ToString() ?? "not applicable"}` seconds, parallel flows `{report.ExtendedTest.ParallelFlows?.ToString() ?? "not applicable"}`, interruption `{report.ExtendedTest.NetworkLossSeconds?.ToString() ?? "not applicable"}` seconds  ");
+        builder.AppendLine($"Test type: `{Text(report.TestType.ToUpperInvariant())}`; extended settings: soak `{report.ExtendedTest.SoakDurationSeconds?.ToString() ?? "not applicable"}` seconds, parallel flows `{report.ExtendedTest.ParallelFlows?.ToString() ?? "not applicable"}`, network transport interruption `{report.ExtendedTest.NetworkTransportInterruptionSeconds?.ToString() ?? "not applicable"}` seconds, process suspend/resume `{report.ExtendedTest.ProcessSuspendResumeSeconds?.ToString() ?? "not applicable"}` seconds  ");
         builder.AppendLine("Heuristic percentages express relative evidence confidence and are not calibrated statistical probabilities.  ");
         if (report.Node is not null)
         {

@@ -1,21 +1,25 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType Condition="'$(TrafficLabEmbedded)' != 'true'">Exe</OutputType>
+    <OutputType Condition="'$(TrafficLabEmbedded)' == 'true'">Library</OutputType>
     <TargetFrameworks>net8.0;net8.0-windows</TargetFrameworks>
-    <UseWindowsForms Condition="'$(TargetFramework)' == 'net8.0-windows'">true</UseWindowsForms>
+    <UseWindowsForms Condition="'$(TargetFramework)' == 'net8.0-windows' and '$(TrafficLabEmbedded)' != 'true'">true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);CA2252</NoWarn>
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>LokiTrafficLab</AssemblyName>
     <RootNamespace>LokiTrafficLab</RootNamespace>
-    <Version>3.5.1</Version>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
+    <Version>3.6.0</Version>
+    <PublishSingleFile Condition="'$(TrafficLabEmbedded)' != 'true'">true</PublishSingleFile>
+    <PublishSingleFile Condition="'$(TrafficLabEmbedded)' == 'true'">false</PublishSingleFile>
+    <SelfContained Condition="'$(TrafficLabEmbedded)' != 'true'">true</SelfContained>
+    <SelfContained Condition="'$(TrafficLabEmbedded)' == 'true'">false</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <EnablePreviewFeatures>true</EnablePreviewFeatures>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <DefineConstants Condition="'$(TrafficLabEmbedded)' == 'true'">$(DefineConstants);TRAFFICLAB_EMBEDDED</DefineConstants>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
@@ -27,6 +31,10 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <Compile Remove="PortableGui.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TrafficLabEmbedded)' == 'true'">
     <Compile Remove="PortableGui.cs" />
   </ItemGroup>
 

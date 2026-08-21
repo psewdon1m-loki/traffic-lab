@@ -19,7 +19,16 @@ public class AndroidOutcomeClassifierTest {
                 .put(JsonUtil.failed("endpoint.tcp", 10, "timeout", null));
         JSONObject outcome = AndroidOutcomeClassifier.applyProfile(stages, new JSONArray(), true);
         assertEquals("PROXY_FAIL", outcome.optString("outcome"));
-        assertEquals("PROXY_PATH_FAIL", outcome.optString("reasonCode"));
+        assertEquals("ENDPOINT_TCP_UNREACHABLE", outcome.optString("reasonCode"));
+    }
+
+    @Test public void dependentStagesRemainSkippedWithoutBecomingFailures() {
+        JSONObject dependent = JsonUtil.dependentSkipped("tunnel.udp", "TCP prerequisite failed.", "endpoint.tcp", "ENDPOINT_TCP_UNREACHABLE");
+        JSONArray stages = new JSONArray().put(JsonUtil.failed("endpoint.tcp", 10, "timeout", null)).put(dependent);
+        AndroidOutcomeClassifier.applyProfile(stages, new JSONArray(), true);
+        assertEquals("skipped", dependent.optString("status"));
+        assertEquals("DEPENDENCY_NOT_MET", dependent.optString("reasonCode"));
+        assertEquals("endpoint.tcp", dependent.optString("dependsOn"));
     }
 
     @Test public void reachableEndpointWithoutAuthIsProtocolFailure() {

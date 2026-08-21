@@ -1,4 +1,4 @@
-Loki Traffic Lab Portable 3.5.1
+Loki Traffic Lab Portable 3.6.0
 ==============================
 
 Results preserve status and add causal outcome/reason fields at stage, profile

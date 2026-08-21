@@ -1,4 +1,4 @@
-LOKI TRAFFIC LAB 3.5.1 - UBUNTU / LINUX
+LOKI TRAFFIC LAB 3.6.0 - UBUNTU / LINUX
 =======================================
 
 This directory contains the headless Linux adaptation of Traffic Lab. Ubuntu
@@ -10,11 +10,11 @@ INSTALL
 
 From a local checkout/release directory:
 
-  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.5.1.tar.gz
+  sudo bash ./Linux/bootstrap.sh --archive ./Linux/releases/LokiTrafficLab-linux-x64-3.6.0.tar.gz
 
 For a hosted release, bootstrap also supports a one-line installation:
 
-  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.5.1.tar.gz
+  curl -fsSL https://YOUR-HOST/bootstrap.sh -o /tmp/tlab-bootstrap.sh && echo 'BOOTSTRAP_SHA256  /tmp/tlab-bootstrap.sh' | sha256sum -c - && sudo bash /tmp/tlab-bootstrap.sh --url https://YOUR-HOST/LokiTrafficLab-linux-x64-3.6.0.tar.gz
 
 The installer requires and verifies the archive SHA-256 sidecar, installs
 versioned files below /opt/tlab, creates /usr/local/bin/tlab, initializes a
@@ -90,11 +90,16 @@ bias without averaging geographically different paths into the primary result.
 Completed uploads use full server-acknowledged request duration and are labelled
 UPLOAD_ACK_BOUNDED_ESTIMATE (at most medium confidence without server timing).
 
-Traffic Lab 3.5.1 preserves status for compatibility and adds outcome,
+Traffic Lab 3.6.0 preserves status for compatibility and adds outcome,
 reasonCode and a human-readable reason to every stage, profile and run. The
 causal classes are PASS, PROXY_FAIL, UNDERLAY_FAIL, TEST_FAILURE and UNKNOWN;
-PROXY_PATH_FAIL and PROTOCOL_AUTH_FAIL distinguish endpoint reachability from
-authentication/protocol failure.
+ENDPOINT_DNS_UNRESOLVED, ENDPOINT_TCP_UNREACHABLE and PROTOCOL_AUTH_FAIL
+distinguish resolution, endpoint reachability and authentication/protocol
+failure. Dependent stages are SKIPPED/DEPENDENCY_NOT_MET and name their root.
+
+Schema 1.1 stores UTC start/end for each profile and stage. Each profile gets a
+run-scoped correlation ID sent on tunneled HTTP controls; it remains explicitly
+client-generated/unconfirmed unless an authorized server/canary log observes it.
 
 The metadata records platform=linux, the Linux distribution from
 /etc/os-release (for example Ubuntu 24.04 LTS), kernel/OS version, CPU
@@ -118,10 +123,12 @@ ip-neighbour evidence for the gateway, read-only UFW status collection and an
 explicit opt-in tcpdump capture capped at 50,000 packets. Packet captures are
 never included in normal result ZIPs.
 
-The extended controlled-interruption stage uses SIGSTOP/SIGCONT on only the
+The extended processSuspendResume stage uses SIGSTOP/SIGCONT on only the
 Xray child process started by Traffic Lab. It requires no firewall mutation,
 does not change UFW, routes or interfaces, and resumes Xray from a finally block
 before testing recovery. `tlab stop` remains the emergency process-group kill.
+Linux does not label this as network loss: networkTransportInterruption is
+SKIPPED/CONTROL_NOT_APPLICABLE unless a real transport-outage mechanism is added.
 
 PARITY WITH WINDOWS
 -------------------
@@ -156,7 +163,7 @@ BUILD
 
 From PowerShell at the repository root:
 
-  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.5.1' -Archive
+  & '.\traffic-lab\Linux\build-linux.ps1' -RuntimeIdentifier linux-x64 -OutputDirectory 'Linux\releases\3.6.0' -Archive
 
 Generated releases are placed in Linux/releases. Shared C# logic remains in
 traffic-lab/src; this folder contains only Linux packaging, runtime assets and

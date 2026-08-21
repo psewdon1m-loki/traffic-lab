@@ -56,7 +56,7 @@ final class TrafficLabRunner {
         if (testType == null) testType = TestType.NORMAL;
         long startedNanos = System.nanoTime();
         String startedAt = JsonUtil.now();
-        String runId = startedAt.replaceAll("[-:.TZ]", "").substring(0, 14) + "-" + UUID.randomUUID().toString().substring(0, 8);
+        String runId = startedAt.replaceAll("[-:.TZ]", "").substring(0, 14) + "Z-" + UUID.randomUUID().toString().substring(0, 8);
         report(2, 0, connections.size(), "Loaded " + connections.size() + " connection(s) for " + testType.value + " test");
         checkCanceled();
 
@@ -82,7 +82,7 @@ final class TrafficLabRunner {
             int current = index;
             ProgressListener profileProgress = (percent, ignored, ignoredTotal, message) ->
                     report(start + (int) Math.round((end - start) * Math.max(0, Math.min(100, percent)) / 100.0), current, connections.size(), "profile-" + String.format(Locale.ROOT, "%02d", current + 1) + ": " + message);
-            ProfileResult profile = runProfile(connections.get(index), index + 1, directExit, directControlAvailable, findActiveMtu(node), profileProgress, testType);
+            ProfileResult profile = runProfile(connections.get(index), index + 1, runId, directExit, directControlAvailable, findActiveMtu(node), profileProgress, testType);
             profiles.add(profile);
             report(end, index + 1, connections.size(), "profile-" + String.format(Locale.ROOT, "%02d", index + 1) + ": completed");
         }
@@ -111,10 +111,11 @@ final class TrafficLabRunner {
         JSONArray speedSummaries = new JSONArray();
         boolean anyDirectControl = false;
         for (int index = 0; index < connections.size(); index++) {
-            checkCanceled(); int ordinal = index + 1;
+            checkCanceled(); int ordinal = index + 1; long profileStartedNanos = System.nanoTime(); String profileStartedAt = JsonUtil.now();
             int startPercent = 5 + (int) Math.floor(index * 90.0 / connections.size());
             int endPercent = 5 + (int) Math.floor((index + 1) * 90.0 / connections.size());
             String profileId = "profile-" + String.format(Locale.ROOT, "%02d", ordinal);
+            String correlationId = "tlab-" + runId + "-" + profileId;
             JSONArray stages = new JSONArray(); ConnectionParser.Profile profile;
             try {
                 profile = ConnectionParser.parse(connections.get(index));
@@ -125,7 +126,8 @@ final class TrafficLabRunner {
                 profiles.add(new ProfileResult(profileId, ordinal, "Invalid profile " + ordinal, "unavailable", new JSONObject(),
                         Collections.<String>emptyList(), Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(),
                         stages, new JSONArray(), new JSONArray(), false,
-                        speedDecision("TEST_FAILURE", "PROFILE_PARSE_FAILURE", "The supplied connection URI could not be parsed.")));
+                        speedDecision("TEST_FAILURE", "PROFILE_PARSE_FAILURE", "The supplied connection URI could not be parsed."))
+                        .finish(profileStartedAt, profileStartedNanos, correlationId));
                 report(endPercent, ordinal, connections.size(), profileId + ": invalid profile skipped");
                 continue;
             }
@@ -138,7 +140,9 @@ final class TrafficLabRunner {
 
             report(startPercent + (endPercent - startPercent) * 30 / 100, index, connections.size(), profileId + ": endpoint DNS and TCP");
             ProbeSuite.DnsResult dns = ProbeSuite.dns(profile.host); stages.put(dns.stage);
-            JSONObject tcp = ProbeSuite.tcp(dns.addresses, profile.port, 3); stages.put(tcp);
+            JSONObject tcp = "failed".equals(dns.stage.optString("status")) && dns.addresses.isEmpty()
+                    ? JsonUtil.dependentSkipped("endpoint.tcp", "Endpoint DNS did not produce an address; TCP was not attempted.", "endpoint.dns", "ENDPOINT_DNS_UNRESOLVED")
+                    : ProbeSuite.tcp(dns.addresses, profile.port, 3); stages.put(tcp);
             JSONObject tunnelSpeed = JsonUtil.object("status", "failed", "error", "Tunnel speed was not attempted.");
             boolean authenticated = false;
             if ("passed".equals(tcp.optString("status"))) {
@@ -146,7 +150,7 @@ final class TrafficLabRunner {
                     stages.put(JsonUtil.passed("tunnel.coreValidation", 0, JsonUtil.object("embeddedCore", true, "abi", android.os.Build.SUPPORTED_ABIS[0])));
                     stages.put(JsonUtil.passed("tunnel.coreStart", 0, JsonUtil.object("httpPort", session.httpPort, "loopbackOnly", true)));
                     Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", session.httpPort));
-                    JSONObject http = ProbeSuite.httpStage(proxy); authenticated = "passed".equals(http.optString("status"));
+                    JSONObject http = ProbeSuite.httpStage(proxy, correlationId); authenticated = "passed".equals(http.optString("status"));
                     stages.put(authenticated
                             ? JsonUtil.passed("tunnel.authenticatedEndToEnd", http.optLong("elapsedMs"), JsonUtil.object("protocol", "vless", "speedPrerequisite", true))
                             : JsonUtil.failed("tunnel.authenticatedEndToEnd", http.optLong("elapsedMs"), "No authenticated control request completed before speed measurement.", http));
@@ -158,17 +162,19 @@ final class TrafficLabRunner {
                         tunnelSpeed = AndroidSpeedTestEngine.combine(tunnelFirst, tunnelSecond);
                         JsonUtil.put(tunnelSpeed, "abbaPasses", new JSONArray().put(tunnelFirst).put(tunnelSecond));
                         stages.put(speedStage("speed.tunnel", tunnelSpeed, true));
-                    } else stages.put(JsonUtil.skipped("speed.tunnel", "Authenticated tunnel prerequisite failed."));
+                    } else stages.put(JsonUtil.dependentSkipped("speed.tunnel", "Authenticated tunnel prerequisite failed.", "tunnel.authenticatedEndToEnd", "PROTOCOL_AUTH_FAIL"));
                 } catch (Exception error) {
                     stages.put(JsonUtil.failed("tunnel.coreStart", 0, JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage()), null));
-                    stages.put(JsonUtil.skipped("tunnel.authenticatedEndToEnd", "The isolated Xray core was unavailable."));
-                    stages.put(JsonUtil.skipped("speed.tunnel", "The isolated Xray core was unavailable."));
+                    stages.put(JsonUtil.dependentSkipped("tunnel.authenticatedEndToEnd", "The isolated Xray core was unavailable.", "tunnel.coreStart", "TESTER_OR_CONFIGURATION_FAILURE"));
+                    stages.put(JsonUtil.dependentSkipped("speed.tunnel", "The isolated Xray core was unavailable.", "tunnel.coreStart", "TESTER_OR_CONFIGURATION_FAILURE"));
                 }
             } else {
-                stages.put(JsonUtil.skipped("tunnel.coreValidation", "Endpoint TCP prerequisite failed."));
-                stages.put(JsonUtil.skipped("tunnel.coreStart", "Endpoint TCP prerequisite failed."));
-                stages.put(JsonUtil.skipped("tunnel.authenticatedEndToEnd", "Endpoint TCP prerequisite failed."));
-                stages.put(JsonUtil.skipped("speed.tunnel", "Endpoint TCP prerequisite failed."));
+                String rootStage = "failed".equals(dns.stage.optString("status")) ? "endpoint.dns" : "endpoint.tcp";
+                String rootCode = "endpoint.dns".equals(rootStage) ? "ENDPOINT_DNS_UNRESOLVED" : "ENDPOINT_TCP_UNREACHABLE";
+                stages.put(JsonUtil.dependentSkipped("tunnel.coreValidation", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+                stages.put(JsonUtil.dependentSkipped("tunnel.coreStart", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+                stages.put(JsonUtil.dependentSkipped("tunnel.authenticatedEndToEnd", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+                stages.put(JsonUtil.dependentSkipped("speed.tunnel", "Endpoint transport prerequisite failed.", rootStage, rootCode));
             }
 
             report(startPercent + (endPercent - startPercent) * 78 / 100, index, connections.size(), profileId + ": direct speed control after tunnel");
@@ -182,10 +188,16 @@ final class TrafficLabRunner {
                     : JsonUtil.partial("speed.comparison", 0, "Direct before/after capacity drifted or was unavailable; tunnel attribution is low-confidence.", comparison))
                     : JsonUtil.skipped("speed.comparison", "No tunnel speed result was available."));
             AndroidOutcomeClassifier.applyProfile(stages, new JSONArray(), directAvailable);
+            boolean localCoreFailed = hasStageWithStatus(stages, "tunnel.coreValidation", "failed")
+                    || hasStageWithStatus(stages, "tunnel.coreStart", "failed");
             JSONObject outcome = !directAvailable
                     ? speedDecision("UNDERLAY_FAIL", "DIRECT_CONTROL_UNAVAILABLE", "Matched direct speed controls produced no usable measurement.")
+                    : "failed".equals(dns.stage.optString("status"))
+                    ? speedDecision("PROXY_FAIL", "ENDPOINT_DNS_UNRESOLVED", "The profile endpoint did not resolve.")
                     : !"passed".equals(tcp.optString("status"))
-                    ? speedDecision("PROXY_FAIL", "PROXY_PATH_FAIL", "The profile endpoint was not TCP-reachable.")
+                    ? speedDecision("PROXY_FAIL", "ENDPOINT_TCP_UNREACHABLE", "The profile endpoint was not TCP-reachable.")
+                    : localCoreFailed
+                    ? speedDecision("TEST_FAILURE", "TESTER_OR_CONFIGURATION_FAILURE", "The local Xray core did not validate or start; the proxy speed path was not fairly evaluated.")
                     : !authenticated
                     ? speedDecision("PROXY_FAIL", "PROTOCOL_AUTH_FAIL", "Endpoint TCP worked but authenticated VLESS traffic did not.")
                     : "failed".equals(tunnelSpeed.optString("status"))
@@ -197,7 +209,8 @@ final class TrafficLabRunner {
             }
             profiles.add(new ProfileResult(profileId, ordinal, profile.name, profile.fingerprint(), profile.declared(), dns.addresses,
                     Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(), stages,
-                    new JSONArray(), new JSONArray(), authenticated, outcome));
+                    new JSONArray(), new JSONArray(), authenticated, outcome)
+                    .finish(profileStartedAt, profileStartedNanos, correlationId));
             report(endPercent, ordinal, connections.size(), profileId + ": speed test completed");
         }
 
@@ -259,8 +272,10 @@ final class TrafficLabRunner {
         return rows.isEmpty() ? null : String.join(" | ", rows);
     }
 
-    private ProfileResult runProfile(String raw, int ordinal, JSONArray directExit, boolean directControlAvailable, Integer activeMtu, ProgressListener listener, TestType testType) throws Exception {
+    private ProfileResult runProfile(String raw, int ordinal, String runId, JSONArray directExit, boolean directControlAvailable, Integer activeMtu, ProgressListener listener, TestType testType) throws Exception {
         String profileId = "profile-" + String.format(Locale.ROOT, "%02d", ordinal);
+        long profileStartedNanos = System.nanoTime(); String profileStartedAt = JsonUtil.now();
+        String correlationId = "tlab-" + runId + "-" + profileId;
         JSONArray stages = new JSONArray();
         JSONArray extendedStages = new JSONArray();
         ProgressListener standardProgress = testType.extended()
@@ -271,7 +286,8 @@ final class TrafficLabRunner {
             profile = ConnectionParser.parse(raw);
         } catch (Exception error) {
             stages.put(JsonUtil.failed("profile.parse", 0, JsonUtil.redact(error.getMessage()), null));
-            return ProfileResult.invalid(profileId, ordinal, stages, testType, directControlAvailable);
+            return ProfileResult.invalid(profileId, ordinal, stages, testType, directControlAvailable)
+                    .finish(profileStartedAt, profileStartedNanos, correlationId);
         }
         stages.put(JsonUtil.passed("profile.parse", 0, profile.declared()));
         standardProgress.onProgress(5, 0, 0, "profile parsed");
@@ -292,7 +308,9 @@ final class TrafficLabRunner {
         standardProgress.onProgress(18, 0, 0, "DNS checks completed");
         checkCanceled();
 
-        JSONObject tcpStage = ProbeSuite.tcp(endpointDns.addresses, profile.port, 3);
+        JSONObject tcpStage = "failed".equals(endpointDns.stage.optString("status")) && endpointDns.addresses.isEmpty()
+                ? JsonUtil.dependentSkipped("endpoint.tcp", "Endpoint DNS did not produce an address; TCP was not attempted.", "endpoint.dns", "ENDPOINT_DNS_UNRESOLVED")
+                : ProbeSuite.tcp(endpointDns.addresses, profile.port, 3);
         stages.put(tcpStage);
         boolean endpointTcpAvailable = "passed".equals(tcpStage.optString("status"));
         JSONObject mtu = new JSONObject();
@@ -309,8 +327,16 @@ final class TrafficLabRunner {
                 : JsonUtil.skipped("network.attribution", "No IP addresses to attribute."));
         stages.put(geoConsensus("network.geoConsensus", endpointDns.addresses, attribution, "endpoint"));
         stages.put(geoConsensus("camouflage.geoConsensus", camouflageDns == null ? Collections.<String>emptyList() : camouflageDns.addresses, attribution, "camouflage-host"));
-        stages.put(ProbeSuite.androidTraceroute(endpointDns.addresses.isEmpty() ? profile.host : endpointDns.addresses.get(0)));
-        stages.put(JsonUtil.unsupported("endpoint.tracerouteAttribution", "Android TTL sweep is retained in endpoint.traceroute; per-hop BGP calls are omitted to cap mobile data and runtime.", null));
+        JSONObject tracerouteStage = "failed".equals(endpointDns.stage.optString("status")) && endpointDns.addresses.isEmpty()
+                ? JsonUtil.dependentSkipped("endpoint.traceroute", "Endpoint DNS did not produce an address; traceroute was not attempted.", "endpoint.dns", "ENDPOINT_DNS_UNRESOLVED")
+                : ProbeSuite.androidTraceroute(endpointDns.addresses.isEmpty() ? profile.host : endpointDns.addresses.get(0));
+        stages.put(tracerouteStage);
+        if ("INVALID_TRACEROUTE_OUTPUT".equals(tracerouteStage.optString("reasonCode")))
+            stages.put(JsonUtil.dependentSkipped("endpoint.tracerouteAttribution", "Invalid traceroute output cannot be attributed.", "endpoint.traceroute", "INVALID_TRACEROUTE_OUTPUT"));
+        else if ("DEPENDENCY_NOT_MET".equals(tracerouteStage.optString("reasonCode")))
+            stages.put(JsonUtil.dependentSkipped("endpoint.tracerouteAttribution", "Traceroute prerequisite failed.", tracerouteStage.optString("dependsOn"), tracerouteStage.optString("rootFailureCode")));
+        else
+            stages.put(JsonUtil.unsupported("endpoint.tracerouteAttribution", "Android TTL sweep is retained in endpoint.traceroute; per-hop BGP calls are omitted to cap mobile data and runtime.", null));
         standardProgress.onProgress(40, 0, 0, "attribution and path checks completed");
         checkCanceled();
 
@@ -318,8 +344,15 @@ final class TrafficLabRunner {
             stages.put(ProbeSuite.tlsFallback(endpointDns.addresses.get(0), profile.port, profile.sni));
             stages.put(ProbeSuite.tlsMatrix(endpointDns.addresses.get(0), profile.port, profile.sni, profile.host));
         } else {
-            stages.put(JsonUtil.skipped("endpoint.tlsFallback", "TLS/REALITY SNI or endpoint IP is unavailable."));
-            stages.put(JsonUtil.skipped("endpoint.tlsMatrix", "TLS matrix is not applicable."));
+            if (!endpointTcpAvailable) {
+                String rootStage = "failed".equals(endpointDns.stage.optString("status")) ? "endpoint.dns" : "endpoint.tcp";
+                String rootCode = "endpoint.dns".equals(rootStage) ? "ENDPOINT_DNS_UNRESOLVED" : "ENDPOINT_TCP_UNREACHABLE";
+                stages.put(JsonUtil.dependentSkipped("endpoint.tlsFallback", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+                stages.put(JsonUtil.dependentSkipped("endpoint.tlsMatrix", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+            } else {
+                stages.put(JsonUtil.notApplicable("endpoint.tlsFallback", "The profile does not declare TLS/REALITY with SNI."));
+                stages.put(JsonUtil.notApplicable("endpoint.tlsMatrix", "TLS matrix is not applicable to this profile."));
+            }
         }
         JSONObject encoding = new JSONObject(); JsonUtil.put(encoding, "declared", profile.packetEncoding == null ? "not-declared" : profile.packetEncoding);
         JsonUtil.put(encoding, "xudpDeclared", "xudp".equalsIgnoreCase(profile.packetEncoding));
@@ -327,7 +360,7 @@ final class TrafficLabRunner {
         stages.put(JsonUtil.passed("profile.packetEncoding", 0, encoding));
         stages.put(endpointTcpAvailable
                 ? ProbeSuite.websocket(profile, endpointDns.addresses.isEmpty() ? profile.host : endpointDns.addresses.get(0))
-                : JsonUtil.skipped("endpoint.websocketUpgrade", "Endpoint TCP prerequisite failed."));
+                : JsonUtil.dependentSkipped("endpoint.websocketUpgrade", "Endpoint TCP prerequisite failed.", "failed".equals(endpointDns.stage.optString("status")) ? "endpoint.dns" : "endpoint.tcp", "failed".equals(endpointDns.stage.optString("status")) ? "ENDPOINT_DNS_UNRESOLVED" : "ENDPOINT_TCP_UNREACHABLE"));
         standardProgress.onProgress(48, 0, 0, "TLS and presentation checked");
 
         JSONArray tunnelExit = new JSONArray();
@@ -335,7 +368,9 @@ final class TrafficLabRunner {
         JSONObject logs = null;
         boolean usable = false;
         if (!endpointTcpAvailable) {
-            addSkippedTunnelPrerequisite(stages, "Endpoint TCP was unreachable; downstream authentication, performance, stability and UDP probes were not attempted.", testType);
+            String rootStage = "failed".equals(endpointDns.stage.optString("status")) ? "endpoint.dns" : "endpoint.tcp";
+            addSkippedTunnelPrerequisite(stages, "Endpoint TCP was unreachable; downstream authentication, performance, stability and UDP probes were not attempted.",
+                    rootStage, "endpoint.dns".equals(rootStage) ? "ENDPOINT_DNS_UNRESOLVED" : "ENDPOINT_TCP_UNREACHABLE");
         } else try (XrayManager.RunSession session = xray.start(profile)) {
             stages.put(JsonUtil.passed("tunnel.coreValidation", 0, JsonUtil.object("embeddedCore", true, "abi", android.os.Build.SUPPORTED_ABIS[0])));
             stages.put(JsonUtil.passed("tunnel.coreStart", 0, JsonUtil.object("httpPort", session.httpPort, "socksPort", session.socksPort, "loopbackOnly", true)));
@@ -345,14 +380,14 @@ final class TrafficLabRunner {
             standardProgress.onProgress(62, 0, 0, "embedded Xray core ready");
 
             Proxy httpProxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", session.httpPort));
-            tunnelExit = ProbeSuite.exitIps(httpProxy);
+            tunnelExit = ProbeSuite.exitIps(httpProxy, correlationId);
             JSONObject exitData = new JSONObject(); JsonUtil.put(exitData, "direct", directExit); JsonUtil.put(exitData, "throughTunnel", tunnelExit);
             JsonUtil.put(exitData, "differsFromDirect", exitsDiffer(directExit, tunnelExit));
             long exitElapsed = sumElapsed(tunnelExit);
             stages.put(ProbeSuite.anyValidExit(tunnelExit) ? JsonUtil.passed("tunnel.exitIp", exitElapsed, exitData)
                     : JsonUtil.failed("tunnel.exitIp", exitElapsed, "No exit-IP service returned a valid address through the tunnel.", exitData));
             stages.put(addressFamilies(directExit, tunnelExit));
-            JSONObject httpStage = ProbeSuite.httpStage(httpProxy); stages.put(httpStage);
+            JSONObject httpStage = ProbeSuite.httpStage(httpProxy, correlationId); stages.put(httpStage);
             usable = "passed".equals(httpStage.optString("status")) || ProbeSuite.anyValidExit(tunnelExit);
             JSONObject authData = new JSONObject(); JsonUtil.put(authData, "protocol", "vless"); JsonUtil.put(authData, "transport", profile.network);
             JsonUtil.put(authData, "security", profile.security); JsonUtil.put(authData, "interpretation", "A destination response through this isolated core proves the supplied profile completed transport security, VLESS authentication and server outbound as a whole.");
@@ -369,31 +404,40 @@ final class TrafficLabRunner {
                 stages.put(speedDirectionStage("tunnel.upload", performance, "upload"));
                 stages.put(JsonUtil.unsupported("tunnel.httpProtocols", "Android HttpURLConnection does not expose the negotiated HTTP version consistently; TLS ALPN is recorded separately.", null));
                 stages.put(payloadMatrix(httpProxy));
-                stages.put(JsonUtil.skipped("tunnel.controlledCanary", "No authorized controlled collector URL is configured in the Android UI."));
+                stages.put(JsonUtil.notApplicable("tunnel.controlledCanary", "No authorized controlled collector URL is configured in the Android UI."));
                 stages.put(ProbeSuite.stability(httpProxy, 3));
                 standardProgress.onProgress(84, 0, 0, "performance and stability checked");
                 stages.put(ProbeSuite.socksUdpDns(session.socksPort));
                 stages.put(ProbeSuite.socksStun(session.socksPort));
                 stages.put(JsonUtil.unsupported("tunnel.quicHandshake", "The APK does not bundle a separate QUIC engine; real UDP and XUDP are tested independently.", null));
             } else {
-                addSkippedTunnelDownstream(stages, "Authenticated end-to-end traffic failed; downstream performance, stability and UDP checks were skipped to avoid repeated timeouts.");
+                addSkippedTunnelDownstream(stages, "Authenticated end-to-end traffic failed; downstream performance, stability and UDP checks were skipped to avoid repeated timeouts.", "tunnel.authenticatedEndToEnd", "PROTOCOL_AUTH_FAIL");
             }
             logs = session.logs();
             standardProgress.onProgress(90, 0, 0, "UDP and Android tunnel checks completed");
         } catch (Exception error) {
             String message = JsonUtil.redact(error.getClass().getSimpleName() + ": " + error.getMessage());
-            putIfAbsent(stages, JsonUtil.failed("tunnel.coreValidation", 0, message, JsonUtil.object("embeddedBinaryAvailable", xray.binaryAvailable(), "binary", "libxray.so")));
-            putIfAbsent(stages, JsonUtil.skipped("tunnel.coreStart", "Embedded Xray did not start."));
-            addSkippedTunnelPrerequisite(stages, "Tunnel core unavailable.", testType);
+            boolean coreStarted = hasStageWithStatus(stages, "tunnel.coreStart", "passed");
+            String rootStage = coreStarted ? "tunnel.unhandled" : "tunnel.coreValidation";
+            putIfAbsent(stages, JsonUtil.failed(rootStage, 0, message, JsonUtil.object("embeddedBinaryAvailable", xray.binaryAvailable(), "binary", "libxray.so")));
+            addSkippedTunnelPrerequisite(stages, "The local tester/core failed; downstream stages were not attempted.", rootStage, "TESTER_OR_CONFIGURATION_FAILURE");
         }
         stages.put(AndroidLogClassifier.stage(logs));
         exitAttribution = ProbeSuite.attribution(ProbeSuite.validExitAddresses(tunnelExit));
         standardProgress.onProgress(92, 0, 0, "tunnel tests completed");
         checkCanceled();
 
-        stages.put(usable ? negativeControls(profile) : JsonUtil.skipped("tunnel.negativeControls", "Authenticated baseline did not succeed; negative authentication controls would not be interpretable."));
+        boolean localCoreFailed = hasStageWithStatus(stages, "tunnel.coreValidation", "failed")
+                || hasStageWithStatus(stages, "tunnel.coreStart", "failed") || hasStageWithStatus(stages, "tunnel.unhandled", "failed");
+        String downstreamRootStage = localCoreFailed
+                ? hasStageWithStatus(stages, "tunnel.unhandled", "failed") ? "tunnel.unhandled"
+                : hasStageWithStatus(stages, "tunnel.coreStart", "failed") ? "tunnel.coreStart" : "tunnel.coreValidation"
+                : endpointTcpAvailable ? "tunnel.authenticatedEndToEnd" : "failed".equals(endpointDns.stage.optString("status")) ? "endpoint.dns" : "endpoint.tcp";
+        String downstreamRootCode = localCoreFailed ? "TESTER_OR_CONFIGURATION_FAILURE"
+                : endpointTcpAvailable ? "PROTOCOL_AUTH_FAIL" : "endpoint.dns".equals(downstreamRootStage) ? "ENDPOINT_DNS_UNRESOLVED" : "ENDPOINT_TCP_UNREACHABLE";
+        stages.put(usable ? negativeControls(profile) : JsonUtil.dependentSkipped("tunnel.negativeControls", "Authenticated baseline did not succeed; negative authentication controls would not be interpretable.", downstreamRootStage, downstreamRootCode));
         standardProgress.onProgress(96, 0, 0, "negative authentication controls completed");
-        stages.put(usable ? xudpControl(profile) : JsonUtil.skipped("tunnel.xudpCompatibility", "Authenticated baseline did not succeed; an XUDP compatibility result would not be attributable."));
+        stages.put(usable ? xudpControl(profile) : JsonUtil.dependentSkipped("tunnel.xudpCompatibility", "Authenticated baseline did not succeed; an XUDP compatibility result would not be attributable.", downstreamRootStage, downstreamRootCode));
         standardProgress.onProgress(98, 0, 0, "XUDP compatibility checked");
         stages.put(infrastructureSignals(endpointDns, camouflageDns, tunnelExit, stages));
 
@@ -402,7 +446,7 @@ final class TrafficLabRunner {
                 extendedStages = AndroidExtendedTestSuite.run(xray, profile, this::checkCanceled,
                         (percent, message) -> listener.onProgress(60 + (int) Math.round(percent * 0.40), 0, 0, message));
             } else {
-                extendedStages = skippedExtendedStages("The authenticated standard tunnel stage did not succeed.");
+                extendedStages = skippedExtendedStages("The authenticated standard tunnel stage did not succeed.", downstreamRootStage, downstreamRootCode);
                 listener.onProgress(100, 0, 0, "extended suite skipped because the profile was not usable");
             }
         } else {
@@ -413,28 +457,34 @@ final class TrafficLabRunner {
         JSONObject outcome = AndroidOutcomeClassifier.applyProfile(stages, extendedStages, directControlAvailable);
         return new ProfileResult(profileId, ordinal, profile.name, profile.fingerprint(), profile.declared(),
                 endpointDns.addresses, camouflageDns == null ? Collections.<String>emptyList() : camouflageDns.addresses,
-                attribution, tunnelExit, exitAttribution, stages, extendedStages, inferences, usable, outcome);
+                attribution, tunnelExit, exitAttribution, stages, extendedStages, inferences, usable, outcome)
+                .finish(profileStartedAt, profileStartedNanos, correlationId);
     }
 
     private static JSONArray skippedExtendedStages(String reason) {
+        return skippedExtendedStages(reason, "tunnel.authenticatedEndToEnd", "PROTOCOL_AUTH_FAIL");
+    }
+
+    private static JSONArray skippedExtendedStages(String reason, String rootStage, String rootFailureCode) {
         JSONArray stages = new JSONArray();
         for (String name : new String[]{"tunnel.extended.speedMatrix", "tunnel.extended.coldWarm", "tunnel.extended.parallelTcp", "tunnel.extended.parallelUdp",
-                "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.networkInterruption"}) {
-            stages.put(JsonUtil.skipped(name, reason));
+                "tunnel.extended.dnsFailureRecovery", "tunnel.extended.soak", "tunnel.extended.reconnect", "tunnel.extended.processRestartInterruption",
+                "tunnel.extended.processSuspendResume", "tunnel.extended.networkTransportInterruption"}) {
+            stages.put(JsonUtil.dependentSkipped(name, reason, rootStage, rootFailureCode));
         }
         return stages;
     }
 
-    private static void addSkippedTunnelPrerequisite(JSONArray stages, String reason, TestType testType) {
+    private static void addSkippedTunnelPrerequisite(JSONArray stages, String reason, String rootStage, String rootFailureCode) {
         for (String name : new String[]{"tunnel.coreValidation", "tunnel.coreStart", "client.captureScope", "tunnel.exitIp",
-                "tunnel.addressFamilies", "tunnel.http", "tunnel.authenticatedEndToEnd"}) putIfAbsent(stages, JsonUtil.skipped(name, reason));
-        addSkippedTunnelDownstream(stages, reason);
+                "tunnel.addressFamilies", "tunnel.http", "tunnel.authenticatedEndToEnd"}) putIfAbsent(stages, JsonUtil.dependentSkipped(name, reason, rootStage, rootFailureCode));
+        addSkippedTunnelDownstream(stages, reason, rootStage, rootFailureCode);
     }
 
-    private static void addSkippedTunnelDownstream(JSONArray stages, String reason) {
+    private static void addSkippedTunnelDownstream(JSONArray stages, String reason, String rootStage, String rootFailureCode) {
         for (String name : new String[]{"tunnel.dnsViaSocks", "tunnel.download", "tunnel.upload", "tunnel.httpProtocols",
                 "tunnel.payloadMatrix", "tunnel.controlledCanary", "tunnel.stability", "tunnel.udp", "tunnel.stun", "tunnel.quicHandshake"}) {
-            putIfAbsent(stages, JsonUtil.skipped(name, reason));
+            putIfAbsent(stages, JsonUtil.dependentSkipped(name, reason, rootStage, rootFailureCode));
         }
     }
 
@@ -442,6 +492,14 @@ final class TrafficLabRunner {
         String name = value.optString("stage");
         for (int i = 0; i < stages.length(); i++) { JSONObject stage = stages.optJSONObject(i); if (stage != null && name.equals(stage.optString("stage"))) return; }
         stages.put(value);
+    }
+
+    private static boolean hasStageWithStatus(JSONArray stages, String name, String status) {
+        for (int index = 0; index < stages.length(); index++) {
+            JSONObject stage = stages.optJSONObject(index);
+            if (stage != null && name.equals(stage.optString("stage")) && status.equals(stage.optString("status"))) return true;
+        }
+        return false;
     }
 
     private static long sumElapsed(JSONArray observations) {
@@ -493,12 +551,15 @@ final class TrafficLabRunner {
         boolean reality = "reality".equalsIgnoreCase(profile.security);
         JSONArray rows = new JSONArray();
         rows.put(JsonUtil.object("variant", "invalid-uuid", "applicable", true,
+                "status", "RUN", "reasonCode", "CONTROL_APPLICABLE",
                 "reason", "The VLESS user identifier is always an authentication input."));
         rows.put(JsonUtil.object("variant", "invalid-short-id", "applicable", reality && present(profile.shortId),
+                "status", reality && present(profile.shortId) ? "RUN" : "SKIP", "reasonCode", reality && present(profile.shortId) ? "CONTROL_APPLICABLE" : "CONTROL_NOT_APPLICABLE",
                 "reason", !reality ? "Short ID is not used when security is not REALITY."
                         : present(profile.shortId) ? "The declared REALITY short ID is an applicable handshake control."
                         : "The REALITY profile does not declare a short ID, so mutating one would not invalidate a supplied parameter."));
         rows.put(JsonUtil.object("variant", "wrong-sni", "applicable", reality && present(profile.sni),
+                "status", reality && present(profile.sni) ? "RUN" : "SKIP", "reasonCode", reality && present(profile.sni) ? "CONTROL_APPLICABLE" : "CONTROL_NOT_APPLICABLE",
                 "reason", !reality ? "SNI is not a REALITY authentication input when security is not REALITY."
                         : present(profile.sni) ? "The declared REALITY SNI is an applicable handshake control."
                         : "The REALITY profile does not declare SNI, so no SNI control is attributable."));
@@ -662,6 +723,8 @@ final class TrafficLabRunner {
         final String profileId; final int ordinal; final String name; final String fingerprint; final JSONObject declared;
         final List<String> endpointIps; final List<String> camouflageIps; final JSONArray attribution; final JSONArray tunnelExit;
         final JSONArray exitAttribution; final JSONArray stages; final JSONArray extendedStages; final JSONArray inferences; final boolean usable; final JSONObject outcome;
+        String startedAt; String completedAt; long durationMs; String correlationId; String serverCorrelationId;
+        String serverCorrelationStatus = "client-generated-unconfirmed";
 
         ProfileResult(String profileId, int ordinal, String name, String fingerprint, JSONObject declared, List<String> endpointIps,
                       List<String> camouflageIps, JSONArray attribution, JSONArray tunnelExit, JSONArray exitAttribution,
@@ -671,9 +734,18 @@ final class TrafficLabRunner {
             this.exitAttribution = exitAttribution; this.stages = stages; this.extendedStages = extendedStages; this.inferences = inferences; this.usable = usable; this.outcome = outcome;
         }
 
+        ProfileResult finish(String profileStartedAt, long profileStartedNanos, String value) {
+            this.startedAt = profileStartedAt;
+            this.completedAt = JsonUtil.now();
+            this.durationMs = ProbeSuite.elapsed(profileStartedNanos);
+            this.correlationId = value;
+            this.serverCorrelationId = value;
+            return this;
+        }
+
         static ProfileResult invalid(String id, int ordinal, JSONArray stages, TestType testType, boolean directControlAvailable) {
             JSONArray extended = testType != null && testType.extended()
-                    ? skippedExtendedStages("The connection URI could not be parsed.") : new JSONArray();
+                    ? skippedExtendedStages("The connection URI could not be parsed.", "profile.parse", "PROFILE_PARSE_FAILURE") : new JSONArray();
             JSONObject outcome = AndroidOutcomeClassifier.applyProfile(stages, extended, directControlAvailable);
             return new ProfileResult(id, ordinal, "Invalid profile " + ordinal, "unavailable", new JSONObject(), Collections.<String>emptyList(), Collections.<String>emptyList(), new JSONArray(), new JSONArray(), new JSONArray(), stages, extended, new JSONArray().put(inference("profileUsable", "unknown", "low", "URI parsing failed.")), false, outcome);
         }

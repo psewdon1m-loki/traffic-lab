@@ -18,7 +18,8 @@ internal static partial class Program
     {
         var startedAt = DateTimeOffset.UtcNow;
         var networkContext = CaptureNetworkEnvironmentForCommands();
-        var runId = $"{startedAt:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}"[..24];
+        var runId = startedAt.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture)
+            + "-" + Guid.NewGuid().ToString("N")[..8];
         var total = Math.Min(input.Uris.Count, options.MaxProfiles);
         var results = new List<SpeedOnlyProfileResult>();
         progress(4, 0, "Speed test: preparing matched direct/tunnel measurements", "running", null);
@@ -29,7 +30,7 @@ internal static partial class Program
             var end = 4 + (int)Math.Floor((index + 1) * 91d / Math.Max(1, total));
             void ProfileProgress(int percent, string message)
                 => progress(start + (int)Math.Round((end - start) * Math.Clamp(percent, 0, 100) / 100d), index, $"profile-{index + 1:00}: {message}", "running", null);
-            results.Add(await RunSpeedOnlyProfileAsync(input.Uris[index], index + 1, options, ProfileProgress, cancellationToken));
+            results.Add(await RunSpeedOnlyProfileAsync(input.Uris[index], index + 1, runId, options, ProfileProgress, cancellationToken));
             progress(end, index + 1, $"profile-{index + 1:00}: speed measurement completed", "running", null);
         }
 
@@ -62,7 +63,7 @@ internal static partial class Program
                 Platform = OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : "other",
                 OperatingSystem = RuntimeInformation.OSDescription,
                 Architecture = RuntimeInformation.OSArchitecture.ToString(),
-                ToolVersion = "3.5.1",
+                ToolVersion = "3.6.0",
                 Connections = total,
                 ExecutionOrder = "sequential",
                 MeasurementContract = "ABBA Direct-Tunnel-Tunnel-Direct matched 1/4/16-flow matrices; synchronized ramp-up and bounded windows; robust three-sample calibration; download/upload; idle and loaded latency; straggler/concurrency classification",
@@ -97,12 +98,21 @@ internal static partial class Program
     private static async Task<SpeedOnlyProfileResult> RunSpeedOnlyProfileAsync(
         string raw,
         int ordinal,
+        string runId,
         RunnerOptions options,
         Action<int, string> progress,
         CancellationToken cancellationToken)
     {
         var profileId = $"profile-{ordinal:00}";
-        var result = new SpeedOnlyProfileResult { ProfileId = profileId, Ordinal = ordinal };
+        var profileStartedAt = DateTimeOffset.UtcNow;
+        var result = new SpeedOnlyProfileResult
+        {
+            ProfileId = profileId,
+            Ordinal = ordinal,
+            StartedAt = profileStartedAt,
+            CorrelationId = $"tlab-{runId}-{profileId}",
+            ServerCorrelationId = $"tlab-{runId}-{profileId}"
+        };
         ConnectionProfile profile;
         try
         {
@@ -121,6 +131,7 @@ internal static partial class Program
             parseStage.Reason = "The supplied connection URI could not be parsed.";
             result.Stages.Add(parseStage);
             result.Outcome = SpeedDecision(OutcomeClassifier.TestFailure, "PROFILE_PARSE_FAILURE", "The supplied connection URI could not be parsed.", "profile.parse");
+            CompleteSpeedProfile(result);
             return result;
         }
 
@@ -171,7 +182,10 @@ internal static partial class Program
                 tcpRows.Add(new { address = address.ToString(), connected = false, elapsedMs = tcpWatch.ElapsedMilliseconds, error = Redact(ex.Message) });
             }
         }
-        result.Stages.Add(StageResult.FromStatus("endpoint.tcp", tcpAvailable ? "passed" : "failed", 0, tcpRows, tcpAvailable ? null : "No endpoint TCP connection succeeded."));
+        var dnsFailed = result.Stages.Any(item => item.Stage == "endpoint.dns" && item.Status == "failed");
+        result.Stages.Add(dnsFailed && addresses.Length == 0
+            ? StageResult.DependentSkipped("endpoint.tcp", "Endpoint DNS did not produce an address; TCP was not attempted.", "endpoint.dns", "ENDPOINT_DNS_UNRESOLVED")
+            : StageResult.FromStatus("endpoint.tcp", tcpAvailable ? "passed" : "failed", 0, tcpRows, tcpAvailable ? null : "No endpoint TCP connection succeeded."));
 
         if (tcpAvailable)
         {
@@ -180,10 +194,12 @@ internal static partial class Program
         }
         else
         {
-            result.Stages.Add(StageResult.Skipped("tunnel.coreValidation", "Endpoint TCP prerequisite failed."));
-            result.Stages.Add(StageResult.Skipped("tunnel.coreStart", "Endpoint TCP prerequisite failed."));
-            result.Stages.Add(StageResult.Skipped("tunnel.authenticatedEndToEnd", "Endpoint TCP prerequisite failed."));
-            result.Stages.Add(StageResult.Skipped("speed.tunnel", "Endpoint TCP prerequisite failed."));
+            var rootStage = dnsFailed ? "endpoint.dns" : "endpoint.tcp";
+            var rootCode = dnsFailed ? "ENDPOINT_DNS_UNRESOLVED" : "ENDPOINT_TCP_UNREACHABLE";
+            result.Stages.Add(StageResult.DependentSkipped("tunnel.coreValidation", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+            result.Stages.Add(StageResult.DependentSkipped("tunnel.coreStart", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+            result.Stages.Add(StageResult.DependentSkipped("tunnel.authenticatedEndToEnd", "Endpoint transport prerequisite failed.", rootStage, rootCode));
+            result.Stages.Add(StageResult.DependentSkipped("speed.tunnel", "Endpoint transport prerequisite failed.", rootStage, rootCode));
         }
 
         progress(79, "ABBA direct-after matched 1/4/16-flow control");
@@ -197,10 +213,15 @@ internal static partial class Program
             || result.DirectAfter?.Series.Any(item => item.SuccessfulAttempts > 0) == true;
         var tunnelAvailable = result.Tunnel?.Series.Any(item => item.SuccessfulAttempts > 0) == true;
         var authPassed = result.Stages.Any(item => item.Stage == "tunnel.authenticatedEndToEnd" && item.Status == "passed");
+        var localCoreFailed = result.Stages.Any(item => item.Status == "failed" && item.Stage is "tunnel.coreValidation" or "tunnel.coreStart");
         result.Outcome = !directAvailable
             ? SpeedDecision(OutcomeClassifier.UnderlayFail, "DIRECT_CONTROL_UNAVAILABLE", "Matched direct speed controls did not produce a measurement.", "speed.directBefore", "speed.directAfter")
+            : dnsFailed
+                ? SpeedDecision(OutcomeClassifier.ProxyFail, "ENDPOINT_DNS_UNRESOLVED", "The profile endpoint did not resolve.", "endpoint.dns")
             : !tcpAvailable
-                ? SpeedDecision(OutcomeClassifier.ProxyFail, "PROXY_PATH_FAIL", "The profile endpoint was not TCP-reachable.", "endpoint.tcp")
+                ? SpeedDecision(OutcomeClassifier.ProxyFail, "ENDPOINT_TCP_UNREACHABLE", "The profile endpoint was not TCP-reachable.", "endpoint.tcp")
+                : localCoreFailed
+                    ? SpeedDecision(OutcomeClassifier.TestFailure, "TESTER_OR_CONFIGURATION_FAILURE", "The local Xray core did not validate or start; the proxy speed path was not fairly evaluated.", "tunnel.coreValidation", "tunnel.coreStart")
                 : !authPassed
                     ? SpeedDecision(OutcomeClassifier.ProxyFail, "PROTOCOL_AUTH_FAIL", "TCP was reachable but the authenticated destination request failed.", "tunnel.authenticatedEndToEnd")
                     : !tunnelAvailable
@@ -215,7 +236,8 @@ internal static partial class Program
             }
             else if (stage.Status == "skipped")
             {
-                stage.Outcome = OutcomeClassifier.Unknown; stage.ReasonCode = "DEPENDENCY_NOT_MET";
+                stage.Outcome = OutcomeClassifier.Unknown;
+                if (stage.ReasonCode == "NOT_CLASSIFIED") stage.ReasonCode = "DEPENDENCY_NOT_MET";
                 stage.Reason = stage.Error ?? "The stage was not run because a prerequisite failed.";
             }
             else if (stage.Stage == "profile.parse" || stage.Stage is "tunnel.coreValidation" or "tunnel.coreStart")
@@ -225,12 +247,12 @@ internal static partial class Program
             }
             else if (stage.Stage == "endpoint.dns")
             {
-                stage.Outcome = OutcomeClassifier.ProxyFail; stage.ReasonCode = "PROXY_ENDPOINT_DNS_FAIL";
+                stage.Outcome = OutcomeClassifier.ProxyFail; stage.ReasonCode = "ENDPOINT_DNS_UNRESOLVED";
                 stage.Reason = stage.Error ?? "The profile endpoint could not be resolved.";
             }
             else if (stage.Stage == "endpoint.tcp")
             {
-                stage.Outcome = OutcomeClassifier.ProxyFail; stage.ReasonCode = "PROXY_PATH_FAIL";
+                stage.Outcome = OutcomeClassifier.ProxyFail; stage.ReasonCode = "ENDPOINT_TCP_UNREACHABLE";
                 stage.Reason = stage.Error ?? "No endpoint TCP connection succeeded.";
             }
             else if (stage.Stage == "tunnel.authenticatedEndToEnd")
@@ -250,7 +272,14 @@ internal static partial class Program
             }
         }
         progress(100, "matched speed comparison completed");
+        CompleteSpeedProfile(result);
         return result;
+    }
+
+    private static void CompleteSpeedProfile(SpeedOnlyProfileResult result)
+    {
+        result.CompletedAt = DateTimeOffset.UtcNow;
+        result.DurationMs = (long)(result.CompletedAt.Value - result.StartedAt).TotalMilliseconds;
     }
 
     private static async Task MeasureSpeedTunnelAsync(
@@ -277,7 +306,11 @@ internal static partial class Program
         {
             var validation = await RunProcessAsync(options.XrayPath, $"run -test -c \"{configPath}\"", runtimeDirectory, options.Timeout, cancellationToken);
             result.Stages.Add(StageResult.FromProcess("tunnel.coreValidation", validation));
-            if (validation.ExitCode != 0) return;
+            if (validation.ExitCode != 0)
+            {
+                AddSpeedDependentStages(result, "tunnel.coreValidation");
+                return;
+            }
             xray = Process.Start(new ProcessStartInfo
             {
                 FileName = options.XrayPath,
@@ -292,6 +325,7 @@ internal static partial class Program
             if (xray is null)
             {
                 result.Stages.Add(StageResult.Failed("tunnel.coreStart", 0, "Failed to start isolated Xray."));
+                AddSpeedDependentStages(result, "tunnel.coreStart");
                 return;
             }
             stdout = xray.StandardOutput.ReadToEndAsync(); stderr = xray.StandardError.ReadToEndAsync();
@@ -299,13 +333,22 @@ internal static partial class Program
             var ready = await WaitForTcpPortAsync(httpPort, TimeSpan.FromSeconds(10), cancellationToken);
             readyWatch.Stop();
             result.Stages.Add(StageResult.FromStatus("tunnel.coreStart", ready ? "passed" : "failed", readyWatch.ElapsedMilliseconds, new { httpPort, processId = xray.Id }, ready ? null : "Xray did not open its loopback HTTP inbound."));
-            if (!ready) return;
-            using var authClient = CreateProxyHttpClient(httpPort, options.Timeout);
+            if (!ready)
+            {
+                AddSpeedDependentStages(result, "tunnel.coreStart");
+                return;
+            }
+            using var authClient = CreateProxyHttpClient(httpPort, options.Timeout, result.ServerCorrelationId);
             var auth = await ProbeHttpAsync(authClient, "https://www.gstatic.com/generate_204", options.Timeout, cancellationToken);
             result.Stages.Add(StageResult.FromStatus("tunnel.authenticatedEndToEnd", auth.Success ? "passed" : "failed", auth.ElapsedMs, auth, auth.Success ? null : auth.Error ?? "No authenticated destination response."));
-            if (!auth.Success) return;
+            if (!auth.Success)
+            {
+                if (!result.Stages.Any(item => item.Stage == "speed.tunnel"))
+                    result.Stages.Add(StageResult.DependentSkipped("speed.tunnel", "Authenticated tunnel prerequisite failed.", "tunnel.authenticatedEndToEnd", "PROTOCOL_AUTH_FAIL"));
+                return;
+            }
             progress(43, "ABBA tunnel leg 1/2 (matched 1/4/16-flow plan)");
-            using var speedClient = SpeedTestEngine.CreateProxyClient(httpPort, options.Timeout);
+            using var speedClient = SpeedTestEngine.CreateProxyClient(httpPort, options.Timeout, result.ServerCorrelationId);
             var tunnelFirst = await SpeedTestEngine.MeasureAsync(speedClient, SpeedTestSettings.SpeedOnly, "tunnel-first", cancellationToken, matchedPlan);
             progress(61, "ABBA tunnel leg 2/2 (matched 1/4/16-flow plan)");
             var tunnelSecond = await SpeedTestEngine.MeasureAsync(speedClient, SpeedTestSettings.SpeedOnly, "tunnel-second", cancellationToken, matchedPlan);
@@ -324,6 +367,13 @@ internal static partial class Program
             if (stderr is not null) try { await stderr; } catch { }
             try { Directory.Delete(runtimeDirectory, recursive: true); } catch { }
         }
+    }
+
+    private static void AddSpeedDependentStages(SpeedOnlyProfileResult result, string rootStage)
+    {
+        foreach (var stage in new[] { "tunnel.coreStart", "tunnel.authenticatedEndToEnd", "speed.tunnel" })
+            if (stage != rootStage && !result.Stages.Any(item => item.Stage == stage))
+                result.Stages.Add(StageResult.DependentSkipped(stage, "The local core prerequisite failed; downstream speed stages were not attempted.", rootStage, "TESTER_OR_CONFIGURATION_FAILURE"));
     }
 
     private static async Task<string> CreateSpeedOnlyPackageAsync(SpeedOnlyRunDocument document, string outputDirectory, CancellationToken cancellationToken)
@@ -361,6 +411,8 @@ internal static partial class Program
         builder.AppendLine($"Run outcome: {document.Outcome.Outcome} / {document.Outcome.ReasonCode}\n");
         foreach (var summary in document.Summary)
             builder.AppendLine($"Speed result [{summary.ProfileId} {summary.Name}]: download={summary.DownloadMbps?.ToString("F2", CultureInfo.InvariantCulture) ?? "n/a"} Mbit/s; upload={summary.UploadMbps?.ToString("F2", CultureInfo.InvariantCulture) ?? "n/a"} Mbit/s; confidence={summary.Confidence}");
+        foreach (var profile in document.Profiles)
+            builder.AppendLine($"Profile timing [{profile.ProfileId}]: started={profile.StartedAt:O}; completed={profile.CompletedAt:O}; duration={TimeSpan.FromMilliseconds(profile.DurationMs ?? 0):c}; correlation={profile.CorrelationId}; server-correlation={profile.ServerCorrelationId} ({profile.ServerCorrelationStatus})");
         builder.AppendLine();
         builder.AppendLine("FILES"); builder.AppendLine("-----");
         builder.AppendLine("speed.json  Raw calibration/measurement samples, 1/4/16-flow download/upload, idle/loaded latency, confidence and matched direct/tunnel comparison.");
@@ -382,7 +434,7 @@ internal static partial class Program
 
 internal sealed class SpeedOnlyRunDocument
 {
-    public string SchemaVersion { get; init; } = "1.0";
+    public string SchemaVersion { get; init; } = "1.1";
     public string OutputType { get; init; } = "speed-test-results";
     public required SpeedOnlyRunMetadata Run { get; init; }
     public required OutcomeDecision Outcome { get; init; }
@@ -415,6 +467,12 @@ internal sealed class SpeedOnlyProfileResult
     public string Name { get; set; } = "unknown";
     public string? ProfileFingerprint { get; set; }
     public DeclaredProfile? Declared { get; set; }
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public long? DurationMs { get; set; }
+    public string? CorrelationId { get; set; }
+    public string? ServerCorrelationId { get; set; }
+    public string ServerCorrelationStatus { get; set; } = "client-generated-unconfirmed";
     public IReadOnlyList<string> EndpointAddresses { get; set; } = [];
     public List<StageResult> Stages { get; init; } = [];
     public SpeedMeasurementReport? DirectBefore { get; set; }

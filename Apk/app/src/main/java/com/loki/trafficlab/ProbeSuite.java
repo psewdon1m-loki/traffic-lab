@@ -238,7 +238,7 @@ final class ProbeSuite {
     }
 
     static JSONObject websocket(ConnectionParser.Profile profile, String address) {
-        if (!"ws".equals(profile.network)) return JsonUtil.skipped("endpoint.websocketUpgrade", "Profile transport is not WebSocket.");
+        if (!"ws".equals(profile.network)) return JsonUtil.notApplicable("endpoint.websocketUpgrade", "Profile transport is not WebSocket.");
         long started = System.nanoTime();
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(address, profile.port), TIMEOUT_MS);
@@ -261,14 +261,16 @@ final class ProbeSuite {
         }
     }
 
-    static JSONArray exitIps(Proxy proxy) {
+    static JSONArray exitIps(Proxy proxy) { return exitIps(proxy, null); }
+
+    static JSONArray exitIps(Proxy proxy, String correlationId) {
         JSONArray result = new JSONArray();
         String[] services = {"https://api.ipify.org", "https://checkip.amazonaws.com", "https://ifconfig.me/ip"};
         for (String service : services) {
             long started = System.nanoTime();
             JSONObject item = new JSONObject(); JsonUtil.put(item, "service", service);
             try {
-                HttpResult response = http(service, proxy, "GET", null, 1024, TIMEOUT_MS + 4_000);
+                HttpResult response = http(service, proxy, "GET", null, 1024, TIMEOUT_MS + 4_000, false, 1024, correlationId);
                 String candidate = firstIp(response.body);
                 JsonUtil.put(item, "statusCode", response.statusCode); JsonUtil.put(item, "elapsedMs", elapsed(started));
                 JsonUtil.put(item, "ip", candidate); JsonUtil.put(item, "valid", candidate != null);
@@ -503,7 +505,9 @@ final class ProbeSuite {
         return Math.sqrt(variance / values.size()) / mean;
     }
 
-    static JSONObject httpStage(Proxy proxy) {
+    static JSONObject httpStage(Proxy proxy) { return httpStage(proxy, null); }
+
+    static JSONObject httpStage(Proxy proxy, String correlationId) {
         long started = System.nanoTime();
         JSONArray observations = new JSONArray();
         boolean success = false;
@@ -511,7 +515,7 @@ final class ProbeSuite {
             JSONObject item = new JSONObject(); JsonUtil.put(item, "target", target);
             long itemStarted = System.nanoTime();
             try {
-                HttpResult response = http(target, proxy, "GET", null, 64 * 1024, TIMEOUT_MS + 5_000);
+                HttpResult response = http(target, proxy, "GET", null, 64 * 1024, TIMEOUT_MS + 5_000, false, 64 * 1024, correlationId);
                 boolean itemSuccess = response.statusCode >= 200 && response.statusCode < 400;
                 success |= itemSuccess;
                 JsonUtil.put(item, "statusCode", response.statusCode); JsonUtil.put(item, "success", itemSuccess);
@@ -673,15 +677,14 @@ final class ProbeSuite {
     static JSONObject androidTraceroute(String host) {
         long started = System.nanoTime(); JSONArray hops = new JSONArray();
         if (!new java.io.File("/system/bin/ping").canExecute()) return JsonUtil.skipped("endpoint.traceroute", "Android ping binary is unavailable.");
+        String targetAddress = canonicalIp(host);
         for (int ttl = 1; ttl <= 12; ttl++) {
             Process process = null;
             try {
                 process = new ProcessBuilder("/system/bin/ping", "-c", "1", "-W", "2", "-t", Integer.toString(ttl), host).redirectErrorStream(true).start();
                 String output = JsonUtil.readUtf8(process.getInputStream(), 8192);
                 process.waitFor();
-                String ip = firstIp(output);
-                JSONObject hop = new JSONObject(); JsonUtil.put(hop, "ttl", ttl); JsonUtil.put(hop, "address", ip);
-                JsonUtil.put(hop, "outcome", process.exitValue() == 0 ? "destination-or-reply" : ip == null ? "timeout" : "ttl-expired");
+                JSONObject hop = parseAndroidPingHop(output, process.exitValue(), ttl);
                 hops.put(hop);
                 if (process.exitValue() == 0) break;
             } catch (Exception error) {
@@ -692,8 +695,60 @@ final class ProbeSuite {
         }
         JSONObject data = new JSONObject(); JsonUtil.put(data, "method", "Android ping TTL sweep"); JsonUtil.put(data, "hops", hops);
         JsonUtil.put(data, "limitation", "ICMP filtering and Android ping variations can hide hops; this is not an authoritative server route.");
-        return hops.length() > 0 ? JsonUtil.passed("endpoint.traceroute", elapsed(started), data)
-                : JsonUtil.skipped("endpoint.traceroute", "No hop evidence was available.");
+        String invalidReason = validateAndroidTraceroute(hops, targetAddress);
+        if (invalidReason != null) {
+            JsonUtil.put(data, "validation", "invalid");
+            return JsonUtil.testFailure("endpoint.traceroute", elapsed(started), "INVALID_TRACEROUTE_OUTPUT", invalidReason, data);
+        }
+        int observed = 0;
+        for (int index = 0; index < hops.length(); index++) {
+            JSONObject hop = hops.optJSONObject(index);
+            if (hop != null && !hop.optString("address").isEmpty()) observed++;
+        }
+        JsonUtil.put(data, "validation", "valid"); JsonUtil.put(data, "observedResponders", observed);
+        return observed > 0 ? JsonUtil.passed("endpoint.traceroute", elapsed(started), data)
+                : JsonUtil.partial("endpoint.traceroute", elapsed(started), "No ICMP hop responder was parsed; the route is inconclusive.", data);
+    }
+
+    static JSONObject parseAndroidPingHop(String output, int exitCode, int ttl) {
+        JSONObject hop = new JSONObject(); JsonUtil.put(hop, "ttl", ttl);
+        String responder = null; String outcome = "timeout";
+        if (output != null) {
+            String[] lines = output.split("\\r?\\n");
+            for (String line : lines) {
+                String lower = line.toLowerCase(Locale.ROOT);
+                if (lower.contains("time to live exceeded") || lower.contains("ttl expired")) {
+                    responder = firstIp(line); outcome = responder == null ? "ttl-expired-unparsed" : "ttl-expired"; break;
+                }
+            }
+            if (exitCode == 0) for (String line : lines) {
+                if (line.toLowerCase(Locale.ROOT).contains("bytes from")) {
+                    responder = firstIp(line); outcome = responder == null ? "destination-reply-unparsed" : "destination-reply"; break;
+                }
+            }
+        }
+        JsonUtil.put(hop, "address", responder); JsonUtil.put(hop, "outcome", outcome);
+        return hop;
+    }
+
+    static String validateAndroidTraceroute(JSONArray hops, String targetAddress) {
+        String previous = null; int consecutive = 0;
+        for (int index = 0; index < hops.length(); index++) {
+            JSONObject hop = hops.optJSONObject(index); if (hop == null) continue;
+            String outcome = hop.optString("outcome"); String address = canonicalIp(hop.optString("address", null));
+            if (!"ttl-expired".equals(outcome) || address == null) { previous = null; consecutive = 0; continue; }
+            if (targetAddress != null && targetAddress.equals(address))
+                return "A ttl-expired row identified the destination itself as an intermediate hop; Android ping output parsing is invalid.";
+            if (address.equals(previous)) consecutive++; else { previous = address; consecutive = 1; }
+            if (consecutive >= 3)
+                return "The same responder was reported as ttl-expired for three consecutive TTL values; the sweep is not credible route evidence.";
+        }
+        return null;
+    }
+
+    private static String canonicalIp(String value) {
+        if (value == null || value.trim().isEmpty()) return null;
+        try { return InetAddress.getByName(value).getHostAddress(); } catch (Exception ignored) { return null; }
     }
 
     static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout) throws Exception {
@@ -706,15 +761,22 @@ final class ProbeSuite {
 
     static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout,
                            boolean forceClose, int maxCaptureBytes) throws Exception {
+        return http(url, proxy, method, body, maxResponse, timeout, forceClose, maxCaptureBytes, null);
+    }
+
+    static HttpResult http(String url, Proxy proxy, String method, byte[] body, int maxResponse, int timeout,
+                           boolean forceClose, int maxCaptureBytes, String correlationId) throws Exception {
         long started = System.nanoTime(); long requestBodyElapsedMs = 0; long requestAcknowledgedElapsedMs = 0;
         long requestBodyStarted = 0;
         HttpURLConnection connection = (HttpURLConnection) (proxy == null ? new URL(url).openConnection() : new URL(url).openConnection(proxy));
         connection.setConnectTimeout(timeout); connection.setReadTimeout(timeout); connection.setInstanceFollowRedirects(true);
         connection.setUseCaches(false);
-        connection.setRequestProperty("User-Agent", "LokiTrafficLabAndroid/1.0");
+        connection.setRequestProperty("User-Agent", "LokiTrafficLabAndroid/3.6");
         connection.setRequestProperty("Accept", "application/json,text/plain,*/*");
         connection.setRequestProperty("Accept-Encoding", "identity");
         connection.setRequestProperty("Connection", forceClose ? "close" : "keep-alive");
+        if (correlationId != null && !correlationId.trim().isEmpty())
+            connection.setRequestProperty("X-Traffic-Lab-Correlation-Id", correlationId);
         connection.setRequestMethod(method);
         if (body != null) {
             connection.setDoOutput(true); connection.setFixedLengthStreamingMode(body.length);
@@ -759,7 +821,7 @@ final class ProbeSuite {
         connection.setConnectTimeout(timeout); connection.setReadTimeout(timeout); connection.setInstanceFollowRedirects(true);
         connection.setUseCaches(false); connection.setRequestMethod("POST"); connection.setDoOutput(true);
         connection.setFixedLengthStreamingMode(bodyBytes);
-        connection.setRequestProperty("User-Agent", "LokiTrafficLabAndroid/1.0");
+        connection.setRequestProperty("User-Agent", "LokiTrafficLabAndroid/3.6");
         connection.setRequestProperty("Content-Type", "application/octet-stream");
         connection.setRequestProperty("Accept-Encoding", "identity");
         connection.setRequestProperty("Connection", forceClose ? "close" : "keep-alive");

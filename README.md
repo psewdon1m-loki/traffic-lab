@@ -162,7 +162,7 @@ Build the self-contained Ubuntu release:
 Install it on Ubuntu in one local command:
 
 ```bash
-sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.5.1.tar.gz
+sudo bash ./bootstrap.sh --archive ./LokiTrafficLab-linux-x64-3.6.0.tar.gz
 ```
 
 After placing VLESS URIs in `~/.config/tlab/connections.txt`, use `tlab start`,
@@ -251,7 +251,7 @@ matrix. Upload is incompressible and streamed through bounded buffers. Reports
 retain raw attempts, p10/median/p90, coefficient of variation, byte-cap flags,
 idle/loaded latency, bounded client CPU/memory context and direct-control drift;
 drift above 15% lowers confidence.
-Release 3.5.1 uses the multi-calibration/windowed estimator on all three
+Release 3.6.0 uses the multi-calibration/windowed estimator on all three
 platforms and in NORMAL, EXTENDED and SPEED modes. It discards warm-up, takes a
 median of repeated calibration samples, synchronizes parallel workers, bounds
 measurement windows and classifies stragglers, endpoint instability, byte caps
@@ -324,6 +324,21 @@ $uri = Read-Host 'Paste VLESS URI'
 Remove-Variable uri
 ```
 
+For an integration that needs the normal pipeline as one clean JSON document
+without CSV, Markdown, ZIP or history artifacts, use `--json-only`:
+
+```powershell
+.\LokiTrafficLab.exe run `
+  --test-type normal `
+  --connections .\my-connections.txt `
+  --json-only .\full-analytics.json
+```
+
+The Windows Cake client uses the same runner through
+`LokiTrafficLab.EmbeddedAnalyticsRunner`, passing VLESS values in memory and
+deleting its temporary JSON after it has been copied into the local analytics
+outbox.
+
 ## Per-connection result package
 
 Every `run` creates a compact `traffic-lab-results-*.zip`. For one connection
@@ -352,10 +367,19 @@ the complete run receive the same causal result contract:
 
 - `PASS` — authenticated end-to-end traffic was observed;
 - `UNDERLAY_FAIL` — the no-proxy direct control was unavailable;
-- `PROXY_FAIL / PROXY_PATH_FAIL` — direct control worked but endpoint TCP did not;
+- `PROXY_FAIL / ENDPOINT_DNS_UNRESOLVED` — direct control worked but the endpoint hostname did not resolve;
+- `PROXY_FAIL / ENDPOINT_TCP_UNREACHABLE` — direct control worked but endpoint TCP did not;
 - `PROXY_FAIL / PROTOCOL_AUTH_FAIL` — endpoint TCP worked but authenticated traffic did not;
 - `TEST_FAILURE` — URI parsing, policy, generated configuration, or local core failed;
 - `UNKNOWN` — skipped, unsupported, partial, or insufficient evidence.
+
+Schema 1.1 records UTC start/end timestamps for every profile and stage, a
+client-generated correlation ID sent as `X-Traffic-Lab-Correlation-Id`, and a
+causal summary. Once DNS or endpoint TCP is the root failure, TLS, auth, exit,
+DNS-through-tunnel, UDP, QUIC and payload checks become `DEPENDENCY_NOT_MET`
+with `dependsOn` and `rootFailureCode`; they are not counted as independent
+failures. Protocol-inapplicable negative controls use
+`SKIP / CONTROL_NOT_APPLICABLE`.
 
 The canonical v2 profile fingerprint uses the same normalized non-secret fields
 on desktop/Linux and Android, so matching connections can be correlated across

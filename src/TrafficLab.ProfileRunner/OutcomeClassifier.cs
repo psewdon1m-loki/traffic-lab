@@ -38,10 +38,10 @@ internal static class OutcomeClassifier
         var endpointDns = Stage(profile, "endpoint.dns");
         var endpointTcp = Stage(profile, "endpoint.tcp");
         if (Failed(endpointDns))
-            return Decision(ProxyFail, "PROXY_ENDPOINT_DNS_FAIL",
+            return Decision(ProxyFail, "ENDPOINT_DNS_UNRESOLVED",
                 "The direct control worked, but the profile endpoint did not resolve on the tested underlay.", endpointDns!.Stage);
         if (Failed(endpointTcp))
-            return Decision(ProxyFail, "PROXY_PATH_FAIL",
+            return Decision(ProxyFail, "ENDPOINT_TCP_UNREACHABLE",
                 "The direct control worked, but no TCP connection to the profile endpoint succeeded.", endpointTcp!.Stage);
 
         var authenticated = Stage(profile, "tunnel.authenticatedEndToEnd");
@@ -91,7 +91,9 @@ internal static class OutcomeClassifier
         if (stage.Status == "skipped")
         {
             stage.Outcome = Unknown;
-            stage.ReasonCode = stage.Error?.Contains("unsupported", StringComparison.OrdinalIgnoreCase) == true
+            stage.ReasonCode = stage.ReasonCode is "DEPENDENCY_NOT_MET" or "NOT_APPLICABLE" or "CONTROL_NOT_APPLICABLE" or "UNSUPPORTED_ON_PLATFORM"
+                ? stage.ReasonCode
+                : stage.Error?.Contains("unsupported", StringComparison.OrdinalIgnoreCase) == true
                 || stage.Error?.Contains("cannot reliably", StringComparison.OrdinalIgnoreCase) == true
                 ? "UNSUPPORTED_ON_PLATFORM"
                 : stage.Error?.Contains("did not", StringComparison.OrdinalIgnoreCase) == true
@@ -99,6 +101,12 @@ internal static class OutcomeClassifier
                     ? "DEPENDENCY_NOT_MET"
                     : "NOT_REQUESTED_OR_NOT_APPLICABLE";
             stage.Reason = stage.Error ?? "The stage was not executed.";
+            return;
+        }
+        if (stage.ReasonCode == "INVALID_TRACEROUTE_OUTPUT")
+        {
+            stage.Outcome = TestFailure;
+            stage.Reason = stage.Error ?? "The traceroute output failed semantic validation.";
             return;
         }
         if (!directControlAvailable && IsRemoteNetworkStage(stage.Stage))
@@ -118,14 +126,14 @@ internal static class OutcomeClassifier
         if (stage.Stage == "endpoint.tcp")
         {
             stage.Outcome = ProxyFail;
-            stage.ReasonCode = "PROXY_PATH_FAIL";
+            stage.ReasonCode = "ENDPOINT_TCP_UNREACHABLE";
             stage.Reason = stage.Error ?? "No TCP path to the profile endpoint was observed.";
             return;
         }
         if (stage.Stage == "endpoint.dns")
         {
             stage.Outcome = ProxyFail;
-            stage.ReasonCode = "PROXY_ENDPOINT_DNS_FAIL";
+            stage.ReasonCode = "ENDPOINT_DNS_UNRESOLVED";
             stage.Reason = stage.Error ?? "The profile endpoint did not resolve.";
             return;
         }

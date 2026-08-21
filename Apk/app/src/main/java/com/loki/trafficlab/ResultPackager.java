@@ -78,6 +78,9 @@ final class ResultPackager {
         for (TrafficLabRunner.ProfileResult profile : input.profiles) {
             profiles.put(JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal,
                     "name", profile.name, "profileFingerprint", profile.fingerprint, "declared", profile.declared,
+                    "startedAt", profile.startedAt, "completedAt", profile.completedAt, "durationMs", profile.durationMs,
+                    "correlationId", profile.correlationId, "serverCorrelationId", profile.serverCorrelationId,
+                    "serverCorrelationStatus", profile.serverCorrelationStatus,
                     "endpointIps", JsonUtil.array(profile.endpointIps), "outcome", profile.outcome,
                     "speedStages", profile.stages));
         }
@@ -135,12 +138,15 @@ final class ResultPackager {
         JSONObject connection = new JSONObject();
         JsonUtil.put(connection, "profileId", profile.profileId); JsonUtil.put(connection, "sourceOrdinal", profile.ordinal);
         JsonUtil.put(connection, "name", profile.name); JsonUtil.put(connection, "profileFingerprint", profile.fingerprint);
+        JsonUtil.put(connection, "startedAt", profile.startedAt); JsonUtil.put(connection, "completedAt", profile.completedAt);
+        JsonUtil.put(connection, "durationMs", profile.durationMs); JsonUtil.put(connection, "correlationId", profile.correlationId);
+        JsonUtil.put(connection, "serverCorrelationId", profile.serverCorrelationId); JsonUtil.put(connection, "serverCorrelationStatus", profile.serverCorrelationStatus);
         JsonUtil.put(connection, "profileFingerprintAlgorithm", "sha256-canonical-v2-truncated-16");
         JsonUtil.put(connection, "declared", profile.declared); JsonUtil.put(connection, "observedEndpointIps", JsonUtil.array(profile.endpointIps));
         JsonUtil.put(connection, "observedCamouflageIps", JsonUtil.array(profile.camouflageIps));
         JsonUtil.put(connection, "exitAttribution", profile.exitAttribution); JsonUtil.put(connection, "stages", profile.stages);
         JsonUtil.put(connection, "statusCounts", statusCounts(profile.stages)); JsonUtil.put(connection, "outcomeCounts", outcomeCounts(profile.stages));
-        JsonUtil.put(connection, "outcome", profile.outcome); JsonUtil.put(connection, "inferences", profile.inferences);
+        JsonUtil.put(connection, "outcome", profile.outcome); JsonUtil.put(connection, "causalSummary", causalSummary(profile)); JsonUtil.put(connection, "inferences", profile.inferences);
         if (input.testType.extended()) JsonUtil.put(connection, "extendedResultsFile", "extended-test.json");
         JSONArray sharedRows = new JSONArray();
         for (Map.Entry<String, List<String>> entry : shared.entrySet()) if (entry.getValue().contains(profile.profileId)) {
@@ -158,13 +164,15 @@ final class ResultPackager {
     static JSONObject extendedJson(PackageInput input, TrafficLabRunner.ProfileResult profile) {
         JSONObject root = base(input, "extended-test-results");
         JsonUtil.put(root, "connection", JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal,
-                "name", profile.name, "profileFingerprint", profile.fingerprint));
+                "name", profile.name, "profileFingerprint", profile.fingerprint, "startedAt", profile.startedAt,
+                "completedAt", profile.completedAt, "durationMs", profile.durationMs, "correlationId", profile.correlationId,
+                "serverCorrelationId", profile.serverCorrelationId, "serverCorrelationStatus", profile.serverCorrelationStatus));
         JsonUtil.put(root, "outcome", profile.outcome);
         JsonUtil.put(root, "statusCounts", statusCounts(profile.extendedStages));
         JsonUtil.put(root, "outcomeCounts", outcomeCounts(profile.extendedStages));
         JsonUtil.put(root, "stages", profile.extendedStages);
         JsonUtil.put(root, "limitations", new JSONArray()
-                .put("Android extended interruption stops only Traffic Lab's isolated Xray process; it does not disable the radio, modify routes or interrupt unrelated applications.")
+                .put("Android processRestartInterruption stops and freshly starts only Traffic Lab's isolated Xray process; processSuspendResume and networkTransportInterruption remain explicitly not applicable.")
                 .put("Cold/warm and parallel-flow behavior is requested at the Android client/Xray inbound; a controlled canary is required to prove server-side connection reuse or multiplexing.")
                 .put("DNS failure/recovery uses a reserved .invalid name and does not inject an outage into the operator recursive resolver.")
                 .put("Soak loss and jitter are HTTPS application observations, not ICMP packet statistics."));
@@ -173,7 +181,8 @@ final class ResultPackager {
 
     private static JSONObject localJson(PackageInput input, TrafficLabRunner.ProfileResult profile) {
         JSONObject root = base(input, "local-machine-and-network-characteristics");
-        JsonUtil.put(root, "appliesTo", JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal, "name", profile.name, "profileFingerprint", profile.fingerprint));
+        JsonUtil.put(root, "appliesTo", JsonUtil.object("profileId", profile.profileId, "sourceOrdinal", profile.ordinal, "name", profile.name, "profileFingerprint", profile.fingerprint,
+                "startedAt", profile.startedAt, "completedAt", profile.completedAt, "durationMs", profile.durationMs, "correlationId", profile.correlationId));
         JsonUtil.put(root, "node", input.node); JsonUtil.put(root, "publicIpObservations", input.directExit);
         JsonUtil.put(root, "publicIpAttribution", input.directAttribution);
         JsonUtil.put(root, "androidSpecificCoverage", new JSONArray()
@@ -187,7 +196,7 @@ final class ResultPackager {
     }
 
     static JSONObject base(PackageInput input, String outputType) {
-        JSONObject root = new JSONObject(); JsonUtil.put(root, "schemaVersion", "1.0"); JsonUtil.put(root, "outputType", outputType);
+        JSONObject root = new JSONObject(); JsonUtil.put(root, "schemaVersion", "1.1"); JsonUtil.put(root, "outputType", outputType);
         JsonUtil.put(root, "generatedAt", JsonUtil.now());
         JSONObject run = new JSONObject(); JsonUtil.put(run, "runId", input.runId); JsonUtil.put(run, "startedAt", input.startedAt);
         JsonUtil.put(run, "completedAt", input.completedAt); JsonUtil.put(run, "durationMs", input.durationMs);
@@ -198,7 +207,8 @@ final class ResultPackager {
         JsonUtil.put(run, "extendedTest", JsonUtil.object("enabled", input.testType.extended(),
                 "soakDurationSeconds", input.testType.extended() ? AndroidExtendedTestSuite.SOAK_SECONDS : null,
                 "parallelFlows", input.testType.extended() ? AndroidExtendedTestSuite.PARALLEL_FLOWS : null,
-                "processInterruptionSeconds", input.testType.extended() ? AndroidExtendedTestSuite.INTERRUPTION_SECONDS : null));
+                "processRestartInterruptionSeconds", input.testType.extended() ? AndroidExtendedTestSuite.INTERRUPTION_SECONDS : null,
+                "processSuspendResume", "not-applicable", "networkTransportInterruption", "not-applicable"));
         JsonUtil.put(run, "executionOrder", "sequential");
         JsonUtil.put(run, "inputSource", "in-app clipboard/import field"); JsonUtil.put(root, "run", run);
         JSONObject location = input.node.optJSONObject("deviceLocation");
@@ -250,7 +260,7 @@ final class ResultPackager {
                 + "Test completed (UTC): " + input.completedAt + "\n"
                 + "Duration: " + formatDuration(input.durationMs) + "\n"
                 + "Test type: " + input.testType.value.toUpperCase(Locale.ROOT) + (input.testType.extended() ? " (long-running/process-disruptive extended suite)" : " (standard suite)") + "\n"
-                + (input.testType.extended() ? "Extended settings: soak=" + AndroidExtendedTestSuite.SOAK_SECONDS + "s, parallel flows=" + AndroidExtendedTestSuite.PARALLEL_FLOWS + ", process interruption=" + AndroidExtendedTestSuite.INTERRUPTION_SECONDS + "s\n" : "")
+                + (input.testType.extended() ? "Extended settings: soak=" + AndroidExtendedTestSuite.SOAK_SECONDS + "s, parallel flows=" + AndroidExtendedTestSuite.PARALLEL_FLOWS + ", process restart interruption=" + AndroidExtendedTestSuite.INTERRUPTION_SECONDS + "s; process suspend/network transport interruption=not applicable\n" : "")
                 + "Device local timezone: " + TimeZone.getDefault().getID() + "\n"
                 + "Platform: android\n"
                 + "Operating system: Android " + androidRelease() + "\n"
@@ -266,6 +276,12 @@ final class ResultPackager {
                 + "CONNECTION\n----------\n"
                 + "Profile ID/order: " + profile.profileId + " / " + profile.ordinal + "\n"
                 + "Name: " + profile.name + "\n"
+                + "Profile started (UTC): " + profile.startedAt + "\n"
+                + "Profile completed (UTC): " + profile.completedAt + "\n"
+                + "Profile duration: " + formatDuration(profile.durationMs) + "\n"
+                + "Client correlation ID: " + profile.correlationId + "\n"
+                + "Server correlation ID: " + profile.serverCorrelationId + " (" + profile.serverCorrelationStatus + ")\n"
+                + "Server correlation note: the ID is sent in X-Traffic-Lab-Correlation-Id on authenticated HTTP controls; without an authorized server log it remains unconfirmed.\n"
                 + "Sanitized fingerprint: " + profile.fingerprint + "\n"
                 + "Fingerprint algorithm: sha256-canonical-v2-truncated-16\n"
                 + "Endpoint: " + profile.declared.optString("host", "unknown") + ":" + profile.declared.optInt("port", 0) + "\n"
@@ -308,6 +324,27 @@ final class ResultPackager {
             JsonUtil.put(counts, outcome, counts.optInt(outcome) + 1);
         }
         return counts;
+    }
+
+    private static JSONObject causalSummary(TrafficLabRunner.ProfileResult profile) {
+        JSONArray all = combinedStages(profile, true); JSONObject root = null; JSONArray dependent = new JSONArray();
+        for (int index = 0; index < all.length(); index++) {
+            JSONObject stage = all.optJSONObject(index); if (stage == null) continue;
+            String code = stage.optString("reasonCode");
+            if (root == null && "failed".equals(stage.optString("status"))
+                    && ("ENDPOINT_DNS_UNRESOLVED".equals(code) || "ENDPOINT_TCP_UNREACHABLE".equals(code)
+                    || "PROTOCOL_AUTH_FAIL".equals(code) || "TESTER_OR_CONFIGURATION_FAILURE".equals(code))) {
+                root = JsonUtil.object("stage", stage.optString("stage"), "outcome", stage.optString("outcome"),
+                        "reasonCode", code, "reason", stage.optString("reason"), "startedAt", stage.optString("startedAt"), "completedAt", stage.optString("completedAt"));
+            }
+            if ("skipped".equals(stage.optString("status")) && "DEPENDENCY_NOT_MET".equals(code)) {
+                dependent.put(JsonUtil.object("stage", stage.optString("stage"), "dependsOn", stage.optString("dependsOn"),
+                        "rootFailureCode", stage.optString("rootFailureCode"), "reason", stage.optString("reason")));
+            }
+        }
+        return JsonUtil.object("rootFailure", root, "dependentSkippedStages", dependent,
+                "interpretation", root == null ? "No causal root failure was identified for this profile."
+                        : "Dependent stages were not executed and are not counted as independent failures.");
     }
 
     private static JSONArray combinedStages(TrafficLabRunner.ProfileResult profile, boolean includeExtended) {

@@ -72,7 +72,7 @@ internal static class ResultPackageBuilder
         var outcomeCounts = connectionStages.GroupBy(item => item.Outcome).ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         return new
         {
-            schemaVersion = "1.0",
+            schemaVersion = "1.1",
             outputType = "connection-characteristics",
             generatedAt = DateTimeOffset.UtcNow,
             run = new
@@ -98,6 +98,12 @@ internal static class ResultPackageBuilder
                 profile.SourceLine,
                 profile.Name,
                 profile.ProfileFingerprint,
+                profile.StartedAt,
+                profile.CompletedAt,
+                profile.DurationMs,
+                profile.CorrelationId,
+                profile.ServerCorrelationId,
+                profile.ServerCorrelationStatus,
                 profileFingerprintAlgorithm = "sha256-canonical-v2-truncated-16",
                 profile.Declared,
                 profile.ObservedEndpointIps,
@@ -107,6 +113,7 @@ internal static class ResultPackageBuilder
                 statusCounts,
                 outcomeCounts,
                 outcome = profile.Outcome,
+                causalSummary = BuildCausalSummary(profile),
                 stages = connectionStages,
                 extendedResultsFile = report.ExtendedTest.Enabled ? "extended-test.json" : null,
                 inferences = profile.Inferences,
@@ -124,6 +131,24 @@ internal static class ResultPackageBuilder
         };
     }
 
+    private static object BuildCausalSummary(ProfileReport profile)
+    {
+        var root = profile.Stages.FirstOrDefault(item => item.Status == "failed" && item.ReasonCode is
+            "ENDPOINT_DNS_UNRESOLVED" or "ENDPOINT_TCP_UNREACHABLE" or "PROTOCOL_AUTH_FAIL" or "TESTER_OR_CONFIGURATION_FAILURE");
+        var dependent = profile.Stages
+            .Where(item => item.Status == "skipped" && item.ReasonCode == "DEPENDENCY_NOT_MET")
+            .Select(item => new { item.Stage, item.DependsOn, item.RootFailureCode, item.Reason })
+            .ToArray();
+        return new
+        {
+            rootFailure = root is null ? null : new { root.Stage, root.Outcome, root.ReasonCode, root.Reason, root.StartedAt, root.CompletedAt },
+            dependentSkippedStages = dependent,
+            interpretation = root is null
+                ? "No causal root failure was identified for this profile."
+                : "Dependent stages were not executed and are not counted as independent failures."
+        };
+    }
+
     private static object BuildExtendedOutput(RunReport report, ProfileReport profile)
     {
         var stages = profile.Stages.Where(item => item.Stage.StartsWith("tunnel.extended.", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -133,7 +158,7 @@ internal static class ResultPackageBuilder
         var outcomeCounts = stages.GroupBy(item => item.Outcome).ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         return new
         {
-            schemaVersion = "1.0",
+            schemaVersion = "1.1",
             outputType = "extended-test-results",
             generatedAt = DateTimeOffset.UtcNow,
             run = new
@@ -151,7 +176,7 @@ internal static class ResultPackageBuilder
                 report.Environment.KernelVersion,
                 report.Environment.Architecture
             },
-            connection = new { profile.ProfileId, profile.SourceOrdinal, profile.Name, profile.ProfileFingerprint },
+            connection = new { profile.ProfileId, profile.SourceOrdinal, profile.Name, profile.ProfileFingerprint, profile.StartedAt, profile.CompletedAt, profile.DurationMs, profile.CorrelationId, profile.ServerCorrelationId, profile.ServerCorrelationStatus },
             outcome = profile.Outcome,
             statusCounts = counts,
             outcomeCounts,
@@ -174,10 +199,10 @@ internal static class ResultPackageBuilder
     {
         return new
         {
-            schemaVersion = "1.0",
+            schemaVersion = "1.1",
             outputType = "local-machine-and-network-characteristics",
             generatedAt = DateTimeOffset.UtcNow,
-            appliesTo = new { profile.ProfileId, profile.SourceOrdinal, profile.Name, profile.ProfileFingerprint },
+            appliesTo = new { profile.ProfileId, profile.SourceOrdinal, profile.Name, profile.ProfileFingerprint, profile.StartedAt, profile.CompletedAt, profile.DurationMs, profile.CorrelationId },
             run = new { report.RunId, report.StartedAt, report.CompletedAt, report.DurationMs, report.TestType, report.ExtendedTest, report.NetworkLabel, report.TestContext, outcome = report.Outcome },
             environment = report.Environment,
             node = report.Node,
@@ -266,7 +291,13 @@ internal static class ResultPackageBuilder
         builder.AppendLine($"Total run duration: {TimeSpan.FromMilliseconds(report.DurationMs ?? 0):c}");
         builder.AppendLine($"Test type: {report.TestType.ToUpperInvariant()} ({(report.ExtendedTest.Enabled ? "long-running/disruptive extended suite" : "standard suite")})");
         if (report.ExtendedTest.Enabled)
-            builder.AppendLine($"Extended settings: soak={report.ExtendedTest.SoakDurationSeconds}s, parallel flows={report.ExtendedTest.ParallelFlows}, network interruption={report.ExtendedTest.NetworkLossSeconds}s, elevated={report.ExtendedTest.Elevated}");
+            builder.AppendLine($"Extended settings: soak={report.ExtendedTest.SoakDurationSeconds}s, parallel flows={report.ExtendedTest.ParallelFlows}, "
+                + (report.ExtendedTest.NetworkTransportInterruptionSeconds.HasValue
+                    ? $"network transport interruption={report.ExtendedTest.NetworkTransportInterruptionSeconds}s"
+                    : report.ExtendedTest.ProcessSuspendResumeSeconds.HasValue
+                        ? $"process suspend/resume={report.ExtendedTest.ProcessSuspendResumeSeconds}s"
+                        : "controlled interruption=not applicable")
+                + $", elevated={report.ExtendedTest.Elevated}");
         builder.AppendLine($"Platform: {report.Environment.Platform}");
         builder.AppendLine($"Operating system: {report.Environment.OperatingSystem}");
         builder.AppendLine($"Kernel/OS version: {report.Environment.KernelVersion}");
@@ -287,6 +318,12 @@ internal static class ResultPackageBuilder
         builder.AppendLine($"Profile ID/order: {profile.ProfileId} / {profile.SourceOrdinal}");
         builder.AppendLine($"Source line: {(profile.SourceLine?.ToString() ?? "stdin/not applicable")}");
         builder.AppendLine($"Name: {profile.Name}");
+        builder.AppendLine($"Profile started (UTC): {profile.StartedAt:O}");
+        builder.AppendLine($"Profile completed (UTC): {profile.CompletedAt:O}");
+        builder.AppendLine($"Profile duration: {TimeSpan.FromMilliseconds(profile.DurationMs ?? 0):c}");
+        builder.AppendLine($"Client correlation ID: {profile.CorrelationId ?? "unavailable"}");
+        builder.AppendLine($"Server correlation ID: {profile.ServerCorrelationId ?? "unavailable"} ({profile.ServerCorrelationStatus})");
+        builder.AppendLine("Server correlation note: the ID is sent in X-Traffic-Lab-Correlation-Id; without an authorized canary/server log it remains unconfirmed.");
         builder.AppendLine($"Sanitized fingerprint: {profile.ProfileFingerprint}");
         builder.AppendLine("Fingerprint algorithm: sha256-canonical-v2-truncated-16");
         builder.AppendLine($"Declared transport: {profile.Declared.Protocol}/{profile.Declared.Security}/{profile.Declared.Network}");

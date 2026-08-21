@@ -24,7 +24,7 @@ function Resolve-DotNetSdk {
         $candidates += Join-Path $env:DOTNET_ROOT "dotnet"
     }
     if ($command) { $candidates += $command.Source }
-    if ($repoRoot) { $candidates += Join-Path $repoRoot "client_pc\.dotnet\dotnet.exe" }
+    if ($repoRoot) { $candidates += Join-Path $repoRoot "client\win\.dotnet\dotnet.exe" }
     if ($env:USERPROFILE) { $candidates += Join-Path $env:USERPROFILE ".dotnet\dotnet.exe" }
     $candidates = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
     foreach ($candidate in $candidates) {

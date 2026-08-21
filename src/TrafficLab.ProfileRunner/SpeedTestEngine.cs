@@ -57,7 +57,7 @@ internal static class SpeedTestEngine
         return CreateClient(handler, timeout);
     }
 
-    public static HttpClient CreateProxyClient(int httpPort, TimeSpan timeout)
+    public static HttpClient CreateProxyClient(int httpPort, TimeSpan timeout, string? correlationId = null)
     {
         var handler = new SocketsHttpHandler
         {
@@ -69,7 +69,10 @@ internal static class SpeedTestEngine
             Proxy = new WebProxy($"http://127.0.0.1:{httpPort}"),
             UseProxy = true
         };
-        return CreateClient(handler, timeout);
+        var client = CreateClient(handler, timeout);
+        if (!string.IsNullOrWhiteSpace(correlationId))
+            client.DefaultRequestHeaders.TryAddWithoutValidation("X-Traffic-Lab-Correlation-Id", correlationId);
+        return client;
     }
 
     private static HttpClient CreateClient(HttpMessageHandler handler, TimeSpan timeout)
@@ -78,7 +81,7 @@ internal static class SpeedTestEngine
         {
             Timeout = timeout + TimeSpan.FromSeconds(45)
         };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("LokiTrafficLab-Speed/3.5");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("LokiTrafficLab-Speed/3.6");
         client.DefaultRequestHeaders.AcceptEncoding.Clear();
         client.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
         return client;
